@@ -1,0 +1,33 @@
+[package]
+name = "twenty-one-pro"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "An offline blackjack basic-strategy trainer for the Yaamava six-deck ruleset"
+license = "MIT"
+default-run = "twenty-one-pro"
+
+[dependencies]
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "x11", "links", "accesskit"] }
+rand = { version = "0.9.2", features = ["small_rng"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+redb = "4.3"
+directories = "6"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[package.metadata.bundle]
+name = "21 Pro"
+identifier = "dev.twentyonepro.trainer"
+category = "Education"
+short_description = "Learn blackjack basic strategy through play and spaced repetition"
+
+[package.metadata.bundle.osx]
+minimum_system_version = "12.0"
