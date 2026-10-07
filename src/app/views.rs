@@ -1,4 +1,4 @@
-use super::{Command, Filter, Page, TrainerApp, now, widgets as w};
+use super::{Command, Page, TrainerApp, now, widgets as w};
 use eframe::egui::{self, RichText, Stroke, vec2};
 use twenty_one_pro::{
     game::Phase,
@@ -208,9 +208,13 @@ impl TrainerApp {
         }
         let previous_filter = self.filter;
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.filter, Filter::Table, "Table play");
-            ui.selectable_value(&mut self.filter, Filter::Practice, "Focused practice");
-            ui.selectable_value(&mut self.filter, Filter::All, "All decisions");
+            ui.selectable_value(&mut self.filter, Some(StudyMode::Table), "Table play");
+            ui.selectable_value(
+                &mut self.filter,
+                Some(StudyMode::Practice),
+                "Focused practice",
+            );
+            ui.selectable_value(&mut self.filter, None, "All decisions");
         });
         if previous_filter != self.filter {
             self.refresh_analytics();

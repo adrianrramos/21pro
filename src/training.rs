@@ -79,20 +79,13 @@ pub struct SkillSummary {
     pub due_at: Option<i64>,
 }
 
-#[derive(Debug, Clone)]
-pub struct TrendPoint {
-    /// One-based nonoverlapping block number, including a trailing partial block.
-    pub index: usize,
-    pub accuracy: f32,
-    pub attempts: u32,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct Analytics {
     pub total: CellStats,
     pub cells: BTreeMap<(HandKind, u8, u8), CellStats>,
     pub categories: BTreeMap<HandKind, CellStats>,
-    pub trend: Vec<TrendPoint>,
+    /// Nonempty, consecutive blocks of up to 25 decisions; the last may be partial.
+    pub trend: Vec<CellStats>,
     /// Smoothed-error ordering, not a claim of statistical significance.
     pub weakest: Vec<SkillSummary>,
 }
@@ -221,12 +214,12 @@ impl Profile {
             exact.entry(situation).or_default().record(correct);
             block.record(correct);
             if block.attempts == 25 {
-                push_trend(&mut result.trend, block);
+                result.trend.push(block);
                 block = CellStats::default();
             }
         }
         if block.attempts > 0 {
-            push_trend(&mut result.trend, block);
+            result.trend.push(block);
         }
         let due: BTreeMap<_, _> = self
             .reviews
@@ -292,14 +285,6 @@ fn lapse(review: &mut ReviewState, at: i64) {
     review.ease = (review.ease - 0.32).max(1.3);
     review.last_review_at = at;
     review.due_at = at.saturating_add(RELEARNING_SECONDS);
-}
-
-fn push_trend(trend: &mut Vec<TrendPoint>, block: CellStats) {
-    trend.push(TrendPoint {
-        index: trend.len() + 1,
-        accuracy: block.accuracy().expect("nonempty trend block"),
-        attempts: block.attempts,
-    });
 }
 
 /// Structural checks for persisted decisions. The engine owns card-level legality.
@@ -428,7 +413,7 @@ mod tests {
             answer(&mut p, repeated, i >= 6, i, StudyMode::Table);
         }
         for i in 0..26 {
-            answer(&mut p, repeated, true, i, StudyMode::Practice);
+            answer(&mut p, repeated, i != 25, i, StudyMode::Practice);
         }
         let table = p.analytics(Some(StudyMode::Table));
         assert_eq!(
@@ -441,16 +426,20 @@ mod tests {
         assert_eq!(table.weakest[0].situation, repeated);
         assert_eq!(table.weakest[0].stats.attempts, 10);
         let practice = p.analytics(Some(StudyMode::Practice));
-        assert_eq!(practice.total.accuracy(), Some(1.0));
+        assert_eq!(practice.total.accuracy(), Some(25.0 / 26.0));
         assert_eq!(
-            practice
-                .trend
-                .iter()
-                .map(|p| p.attempts)
-                .collect::<Vec<_>>(),
-            vec![25, 1]
+            practice.trend,
+            vec![
+                CellStats {
+                    attempts: 25,
+                    mistakes: 0
+                },
+                CellStats {
+                    attempts: 1,
+                    mistakes: 1
+                },
+            ]
         );
-        assert_eq!(practice.trend[1].index, 2);
         assert_eq!(p.analytics(None).total.attempts, 37);
     }
 

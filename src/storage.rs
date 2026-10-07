@@ -178,9 +178,8 @@ fn validate(profile: &Profile) -> Result<(), StorageError> {
         }
         decision_times.insert((attempt.situation, attempt.at));
     }
-    let mut reviewed = BTreeSet::new();
     for review in &profile.reviews {
-        let (correct, wrong) = counts.get(&review.situation).copied().unwrap_or_default();
+        let (correct, wrong) = counts.remove(&review.situation).unwrap_or_default();
         let interval_valid = match review.repetitions {
             0 => review.interval_days == 0,
             1 => review.interval_days == 1,
@@ -192,8 +191,7 @@ fn validate(profile: &Profile) -> Result<(), StorageError> {
         } else {
             i64::from(review.interval_days) * 86_400
         };
-        if !reviewed.insert(review.situation)
-            || !valid_situation(review.situation)
+        if !valid_situation(review.situation)
             || !review.ease.is_finite()
             || !(1.3..=2.5).contains(&review.ease)
             || wrong == 0
@@ -207,10 +205,7 @@ fn validate(profile: &Profile) -> Result<(), StorageError> {
             return Err(corrupt("invalid or duplicate review schedule"));
         }
     }
-    if counts
-        .iter()
-        .any(|(situation, (_, wrong))| *wrong > 0 && !reviewed.contains(situation))
-    {
+    if counts.values().any(|(_, wrong)| *wrong > 0) {
         return Err(corrupt(
             "a mistaken situation is missing its review schedule",
         ));
@@ -309,6 +304,9 @@ mod tests {
         assert!(matches!(store.load(), Err(StorageError::Corrupt(_))));
         profile.reviews[0].due_at = 700;
         profile.reviews.push(profile.reviews[0].clone());
+        raw_snapshot(&store, &serde_json::to_vec(&profile).unwrap());
+        assert!(matches!(store.load(), Err(StorageError::Corrupt(_))));
+        profile.reviews.clear();
         raw_snapshot(&store, &serde_json::to_vec(&profile).unwrap());
         assert!(matches!(store.load(), Err(StorageError::Corrupt(_))));
     }

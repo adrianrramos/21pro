@@ -417,11 +417,8 @@ pub fn heatmap(
                     let fill = if stats.attempts == 0 {
                         BG
                     } else {
-                        blend(
-                            Color32::from_rgb(38, 97, 82),
-                            Color32::from_rgb(177, 77, 64),
-                            rate,
-                        )
+                        Color32::from_rgb(38, 97, 82)
+                            .lerp_to_gamma(Color32::from_rgb(177, 77, 64), rate)
                     };
                     let (rect, response) =
                         ui.allocate_exact_size(vec2(cell_width, 27.0), Sense::click());
@@ -461,11 +458,6 @@ pub fn heatmap(
     });
     selected
 }
-fn blend(a: Color32, b: Color32, amount: f32) -> Color32 {
-    let mix = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * amount).round() as u8;
-    Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
-}
-
 pub fn trend(ui: &mut egui::Ui, analytics: &Analytics) {
     ui.label(RichText::new("Accuracy over time").strong());
     if analytics.trend.is_empty() {
@@ -492,9 +484,10 @@ pub fn trend(ui: &mut egui::Ui, analytics: &Analytics) {
     let denominator = (analytics.trend.len().saturating_sub(1)).max(1) as f32;
     let mut previous = None;
     for (index, point) in analytics.trend.iter().enumerate() {
+        let accuracy = point.accuracy().expect("nonempty trend block");
         let position = pos2(
             plot.left() + index as f32 / denominator * plot.width(),
-            plot.bottom() - point.accuracy * plot.height(),
+            plot.bottom() - accuracy * plot.height(),
         );
         if let Some(previous) = previous {
             painter.line_segment([previous, position], Stroke::new(2.0, GREEN));
@@ -511,8 +504,8 @@ pub fn trend(ui: &mut egui::Ui, analytics: &Analytics) {
         );
         response.on_hover_text(format!(
             "Block {}: {:.0}% correct across {} decisions",
-            point.index,
-            point.accuracy * 100.0,
+            index + 1,
+            accuracy * 100.0,
             point.attempts
         ));
         previous = Some(position);
