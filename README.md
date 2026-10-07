@@ -142,6 +142,8 @@ This is one Cargo package with a library and a desktop binary. The library expos
 | `src/app/views.rs`, `src/app/widgets.rs` | Closures, immediate-mode UI, custom painting | How rendering reads state and emits a command without replaying game actions every frame |
 | `src/main.rs` | Native application entry point, configuration | How the window and `TrainerApp` are created |
 
+`Analytics::trend` reuses `CellStats` for nonempty blocks of up to 25 decisions; the renderer gets block numbers from their positions. Analytics and the UI use `Option<StudyMode>`: `Some(mode)` selects one mode and `None` selects both. The controller owns table/practice identity, so the game engine needs no training-mode flag. These changes leave the saved profile format unchanged.
+
 ### A concrete decision to follow
 
 For an original two-card hard 16 against a dealer 10, the available late surrender is recommended. If you choose **Stand**:
@@ -150,7 +152,7 @@ For an original two-card hard 16 against a dealer 10, the available late surrend
 2. `strategy::recommendation` returns surrender and an explanation.
 3. `Game::act(Action::Stand)` actually stands and resolves the hand.
 4. `Profile::record_attempt` stores the chosen and expected actions, and creates/updates a review card.
-5. The controller records the completed original round exactly once and saves the profile.
+5. After a successful `deal` or `act`, the controller records a completed original round once and saves the profile. Finished games reject further actions, so rendering or rejected commands cannot count the round again.
 6. egui paints the new table and the correction. The financial outcome does not alter the mistake record.
 
 If the same hard 16 came **after a hit**, surrender is unavailable and the recommendation changes. This is why a single key such as `"16 vs 10"` would be an incorrect data model.

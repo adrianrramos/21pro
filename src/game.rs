@@ -83,7 +83,6 @@ pub struct Game {
     pub active: usize,
     pub phase: Phase,
     pub result: Option<RoundResult>,
-    pub is_practice: bool,
     shoe: Vec<Card>,
     rng: SmallRng,
     insured: bool,
@@ -99,7 +98,6 @@ impl Game {
             active: 0,
             phase: Phase::Ready,
             result: None,
-            is_practice: false,
             shoe: Vec::with_capacity(312),
             rng: SmallRng::seed_from_u64(seed),
             insured: false,
@@ -146,7 +144,6 @@ impl Game {
         self.active = 0;
         self.splits_used = 0;
         self.insured = false;
-        self.is_practice = false;
         let first = self.draw();
         let upcard = self.draw();
         let second = self.draw();
@@ -350,7 +347,6 @@ impl Game {
             return Err(invalid("dealer upcard must be 2 through ace"));
         }
         let mut game = Self::new(seed);
-        game.is_practice = true;
         if target.kind == HandKind::Insurance {
             let canonical = Situation {
                 kind: HandKind::Insurance,
@@ -809,7 +805,6 @@ mod tests {
         for (seed, s) in cases.into_iter().enumerate() {
             let mut game = Game::practice(s, seed as u64).unwrap_or_else(|e| panic!("{s:?}: {e}"));
             assert_eq!(game.situation(), Some(s));
-            assert!(game.is_practice);
             assert_eq!(game.hands.len(), 1);
             inventory(&game);
             finish(&mut game);

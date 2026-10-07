@@ -24,21 +24,6 @@ enum Page {
     Practice,
     Rules,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Filter {
-    Table,
-    Practice,
-    All,
-}
-impl Filter {
-    fn mode(self) -> Option<StudyMode> {
-        match self {
-            Self::Table => Some(StudyMode::Table),
-            Self::Practice => Some(StudyMode::Practice),
-            Self::All => None,
-        }
-    }
-}
 
 struct Feedback {
     situation: Situation,
@@ -71,17 +56,15 @@ pub struct TrainerApp {
     allow_close: bool,
     close_warning: bool,
     table: Game,
-    table_recorded: bool,
     table_feedback: Vec<Feedback>,
     practice: Option<Game>,
-    practice_recorded: bool,
     practice_feedback: Vec<Feedback>,
     practice_queue: VecDeque<Situation>,
     practice_total: usize,
     practice_completed: usize,
     practice_start_attempt: usize,
     practice_target: Option<Situation>,
-    filter: Filter,
+    filter: Option<StudyMode>,
     analytics: Analytics,
     table_stats: CellStats,
     heatmap: HandKind,
@@ -134,17 +117,15 @@ impl TrainerApp {
             allow_close: false,
             close_warning: false,
             table: Game::new(rand::random()),
-            table_recorded: false,
             table_feedback: Vec::new(),
             practice: None,
-            practice_recorded: false,
             practice_feedback: Vec::new(),
             practice_queue: VecDeque::new(),
             practice_total: 0,
             practice_completed: 0,
             practice_start_attempt: 0,
             practice_target: None,
-            filter: Filter::Table,
+            filter: Some(StudyMode::Table),
             analytics,
             table_stats,
             heatmap: HandKind::Hard,
@@ -154,8 +135,8 @@ impl TrainerApp {
     }
 
     fn refresh_analytics(&mut self) {
-        self.analytics = self.profile.analytics(self.filter.mode());
-        self.table_stats = if self.filter == Filter::Table {
+        self.analytics = self.profile.analytics(self.filter);
+        self.table_stats = if self.filter == Some(StudyMode::Table) {
             self.analytics.total
         } else {
             self.profile.analytics(Some(StudyMode::Table)).total
@@ -177,21 +158,17 @@ impl TrainerApp {
         }
     }
 
+    // Called once per successful deal/action; finished games reject further actions.
     fn finish_round(&mut self, practice: bool) {
         if practice {
-            if !self.practice_recorded
-                && let Some(game) = &self.practice
+            if let Some(game) = &self.practice
                 && game.phase == Phase::Finished
             {
-                self.practice_recorded = true;
                 self.practice_completed += 1;
             }
-        } else if !self.table_recorded
-            && let Some(result) = &self.table.result
-        {
+        } else if let Some(result) = &self.table.result {
             let was_unlocked = self.profile.assessment_unlocked();
             self.profile.record_round(now(), result.net_half_units);
-            self.table_recorded = true;
             if !was_unlocked && self.profile.assessment_unlocked() {
                 self.just_unlocked = true;
                 self.page = Page::Insights;
@@ -207,7 +184,6 @@ impl TrainerApp {
                     self.practice = Some(game);
                     self.practice_target = Some(target);
                     self.practice_feedback.clear();
-                    self.practice_recorded = false;
                     self.error = None;
                 }
                 Err(error) => {
@@ -233,13 +209,12 @@ impl TrainerApp {
                 match self.table.deal() {
                     Ok(()) => {
                         self.just_unlocked = false;
-                        self.table_recorded = false;
                         self.table_feedback.clear();
                         self.error = None;
                         self.finish_round(false);
                         self.refresh_analytics();
                         // A natural can finish a round without a decision.
-                        if self.table_recorded {
+                        if self.table.result.is_some() {
                             self.persist_progress();
                         }
                     }
