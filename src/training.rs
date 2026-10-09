@@ -11,7 +11,7 @@ use crate::counting::CountingRecord;
 use crate::model::{ASSESSMENT_ROUNDS, Action, HandKind, RULESET_ID, Situation};
 use crate::strategy::recommendation;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 const DAY: i64 = 86_400;
 const RELEARNING_SECONDS: i64 = 600;
 
@@ -319,8 +319,11 @@ pub(crate) fn valid_situation(s: Situation) -> bool {
     if s.split_aces {
         return s.kind == HandKind::Pair && s.value == 11 && !s.can_double && !s.can_surrender;
     }
+    if s.kind == HandKind::Pair && (!s.can_double || (!s.can_split && s.can_surrender)) {
+        return false;
+    }
     match s.kind {
-        HandKind::Hard => (4..=20).contains(&s.value),
+        HandKind::Hard => (5..=19).contains(&s.value) || (s.value == 20 && !s.can_double),
         HandKind::Soft => (13..=20).contains(&s.value),
         HandKind::Pair => (2..=11).contains(&s.value),
         HandKind::Insurance => unreachable!(),
@@ -533,5 +536,27 @@ mod tests {
         );
         assert!(p.attempts.is_empty());
         assert!(p.reviews.is_empty());
+    }
+    #[test]
+    fn impossible_practice_contexts_are_rejected() {
+        let ordinary_pair_without_double = Situation {
+            kind: HandKind::Pair,
+            value: 8,
+            dealer: 10,
+            can_double: false,
+            can_split: false,
+            can_surrender: false,
+            split_aces: false,
+        };
+        assert!(!valid_situation(ordinary_pair_without_double));
+        assert!(!valid_situation(Situation {
+            kind: HandKind::Hard,
+            value: 4,
+            dealer: 10,
+            can_double: true,
+            can_split: false,
+            can_surrender: true,
+            split_aces: false,
+        }));
     }
 }

@@ -3,7 +3,7 @@ use std::time::Duration;
 use super::{Command, Page, TrainerApp, now, widgets as w};
 use eframe::egui::{self, RichText, Stroke, vec2};
 use twenty_one_pro::{
-    counting::{TRIAL_SIZE, format_completed_at, sorted_history},
+    counting::{TRIAL_SIZE, format_completed_at},
     game::Phase,
     model::{ASSESSMENT_ROUNDS, HandKind},
     strategy,
@@ -562,7 +562,7 @@ impl TrainerApp {
         ui.add_space(18.0);
         w::panel().show(ui, |ui| {
             ui.label(RichText::new("Saved trials").size(20.0).strong());
-            let history = sorted_history(&self.profile.counting_history);
+            let history = &self.counting_history;
             if history.is_empty() {
                 w::muted(
                     ui,

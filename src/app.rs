@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use twenty_one_pro::{
-    counting::{CountingTrial, parse_submitted_count},
+    counting::{CountingRecord, CountingTrial, parse_submitted_count, sorted_history},
     game::{Game, Phase},
     model::{Action, HandKind, Situation},
     storage::{self, Store},
@@ -82,6 +82,7 @@ pub struct TrainerApp {
     counting_input: String,
     counting_input_error: Option<String>,
     counting_assessment: Option<CountingAssessment>,
+    counting_history: Vec<CountingRecord>,
     filter: Option<StudyMode>,
     analytics: Analytics,
     table_stats: CellStats,
@@ -124,6 +125,7 @@ impl TrainerApp {
         };
         let analytics = profile.analytics(Some(StudyMode::Table));
         let table_stats = analytics.total;
+        let counting_history = sorted_history(&profile.counting_history);
         Self {
             page: Page::Table,
             profile,
@@ -149,6 +151,7 @@ impl TrainerApp {
             counting_input: String::new(),
             counting_input_error: None,
             counting_assessment: None,
+            counting_history,
             filter: Some(StudyMode::Table),
             analytics,
             table_stats,
@@ -165,7 +168,11 @@ impl TrainerApp {
     }
 
     fn reset_counting_trial(&mut self) {
-        let mut trial = CountingTrial::new(rand::random());
+        self.reset_counting_trial_with_seed(rand::random());
+    }
+
+    fn reset_counting_trial_with_seed(&mut self, seed: u64) {
+        let mut trial = CountingTrial::new(seed);
         if let Err(error) = trial.start() {
             self.error = Some(format!("Cannot start card-counting trial: {error}"));
             return;
@@ -368,6 +375,7 @@ impl TrainerApp {
                 if correct {
                     self.profile
                         .record_counting_trial(now(), elapsed.as_millis() as u64);
+                    self.counting_history = sorted_history(&self.profile.counting_history);
                     self.persist_progress();
                 }
             }
@@ -488,5 +496,110 @@ impl eframe::App for TrainerApp {
             self.execute(command);
             ctx.request_repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use twenty_one_pro::counting::TRIAL_SIZE;
+
+    fn test_app(store: Store) -> TrainerApp {
+        let profile = Profile::default();
+        let analytics = profile.analytics(Some(StudyMode::Table));
+        TrainerApp {
+            page: Page::Counting,
+            profile,
+            store: Some(store),
+            data_path: PathBuf::new(),
+            startup_error: None,
+            error: None,
+            dirty: false,
+            allow_close: false,
+            close_warning: false,
+            table: Game::new(1),
+            table_feedback: Vec::new(),
+            practice: None,
+            practice_feedback: Vec::new(),
+            practice_queue: VecDeque::new(),
+            practice_total: 0,
+            practice_completed: 0,
+            practice_start_attempt: 0,
+            practice_target: None,
+            counting: None,
+            counting_started_at: None,
+            counting_elapsed: None,
+            counting_input: String::new(),
+            counting_input_error: None,
+            counting_assessment: None,
+            counting_history: Vec::new(),
+            filter: Some(StudyMode::Table),
+            table_stats: analytics.total,
+            analytics,
+            heatmap: HandKind::Hard,
+            selected_cell: None,
+            just_unlocked: false,
+        }
+    }
+
+    fn finish_counting_trial(app: &mut TrainerApp, seed: u64) -> i32 {
+        app.reset_counting_trial_with_seed(seed);
+        for _ in 1..TRIAL_SIZE {
+            app.execute(Command::NextCounting);
+        }
+        assert_eq!(app.counting.as_ref().unwrap().cards_seen(), TRIAL_SIZE);
+        app.execute(Command::FinishCounting);
+        assert!(app.counting_started_at.is_none());
+        assert!(app.counting_elapsed.is_some());
+        app.counting.as_ref().unwrap().actual_count()
+    }
+
+    #[test]
+    fn counting_controller_assesses_once_and_saves_only_correct_trials() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("profile.redb");
+        let store = Store::open(&path).unwrap();
+        let mut app = test_app(store);
+
+        let actual = finish_counting_trial(&mut app, 42);
+        let elapsed = app.counting_elapsed.unwrap();
+        assert_eq!(app.counting_duration(), elapsed);
+
+        app.counting_input = "not a count".to_owned();
+        app.execute(Command::SubmitCounting);
+        assert!(app.counting_assessment.is_none());
+        assert!(app.counting_input_error.is_some());
+        assert!(app.profile.counting_history.is_empty());
+
+        app.counting_input = (actual + 1).to_string();
+        app.execute(Command::SubmitCounting);
+        assert!(
+            !app.counting_assessment.as_ref().unwrap().correct,
+            "the deliberately wrong answer must be assessed as incorrect"
+        );
+        assert!(app.profile.counting_history.is_empty());
+
+        app.counting_input = actual.to_string();
+        app.execute(Command::SubmitCounting);
+        assert!(app.profile.counting_history.is_empty());
+
+        let actual = finish_counting_trial(&mut app, 7);
+        let elapsed = app.counting_elapsed.unwrap();
+        app.counting_input = actual.to_string();
+        app.execute(Command::SubmitCounting);
+        assert!(app.counting_assessment.as_ref().unwrap().correct);
+        assert_eq!(app.profile.counting_history.len(), 1);
+        assert_eq!(
+            app.profile.counting_history[0].duration_ms,
+            elapsed.as_millis() as u64
+        );
+
+        app.execute(Command::SubmitCounting);
+        assert_eq!(app.profile.counting_history.len(), 1);
+
+        drop(app);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.load().unwrap().counting_history.len(), 1);
     }
 }
