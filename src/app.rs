@@ -423,11 +423,13 @@ impl TrainerApp {
 impl eframe::App for TrainerApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
-        ctx.request_repaint_after(if self.counting_started_at.is_some() {
-            Duration::from_millis(100)
-        } else {
-            Duration::from_secs(30)
-        });
+        ctx.request_repaint_after(
+            if self.page == Page::Counting && self.counting_started_at.is_some() {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(30)
+            },
+        );
         if self.dirty && !self.allow_close && ctx.input(|input| input.viewport().close_requested())
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);

@@ -297,16 +297,46 @@ mod tests {
     fn older_profiles_without_counting_history_still_load() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("profile.redb")).unwrap();
-        let mut snapshot = serde_json::to_value(Profile::default()).unwrap();
+        let mut legacy = Profile::default();
+        legacy.record_round(42, 3);
+        legacy.record_attempt(situation(), Action::Stand, 100, StudyMode::Table);
+        let expected_rounds = serde_json::to_value(&legacy.rounds).unwrap();
+        let expected_attempts = serde_json::to_value(&legacy.attempts).unwrap();
+        let expected_reviews = serde_json::to_value(&legacy.reviews).unwrap();
+        let mut snapshot = serde_json::to_value(legacy).unwrap();
         snapshot.as_object_mut().unwrap().remove("counting_history");
         snapshot["schema_version"] = serde_json::json!(1);
         raw_snapshot(&store, &serde_json::to_vec(&snapshot).unwrap());
         let mut loaded = store.load().unwrap();
         assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            serde_json::to_value(&loaded.rounds).unwrap(),
+            expected_rounds
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded.attempts).unwrap(),
+            expected_attempts
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded.reviews).unwrap(),
+            expected_reviews
+        );
         assert!(loaded.counting_history.is_empty());
         store.save(&loaded).unwrap();
         loaded = store.load().unwrap();
         assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            serde_json::to_value(&loaded.rounds).unwrap(),
+            expected_rounds
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded.attempts).unwrap(),
+            expected_attempts
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded.reviews).unwrap(),
+            expected_reviews
+        );
     }
 
     #[test]
