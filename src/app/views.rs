@@ -487,6 +487,8 @@ impl TrainerApp {
             ui.hyperlink_to("Open the supplied CBJN report", "https://assets.bj21.com/newsletters/pdf_files/000/000/113/original/CBJN2502.pdf?1648784494#page=13");
             ui.hyperlink_to("Strategy reference: Wizard of Odds H17 chart", "https://wizardofodds.com/games/blackjack/strategy/4-decks/");
             w::muted(ui, "The reference page's prose describes S17. This app follows its H17 chart, including the H17-specific doubling and surrender decisions.");
+            ui.hyperlink_to("Card artwork: CardMeister full SVG set", "https://cardmeister.github.io/index.html?full");
+            w::muted(ui, "The card artwork is bundled offline from CardMeister's full implementation under the Unlicense. Source revision and export provenance are recorded in assets/cards/README.md.");
         });
         ui.add_space(14.0);
         w::panel().show(ui, |ui| {

@@ -1,10 +1,8 @@
 use super::{Command, Feedback};
-use eframe::egui::{
-    self, Align2, Color32, FontId, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2,
-};
+use eframe::egui::{self, Align2, Color32, FontId, RichText, Sense, Stroke, Vec2, pos2, vec2};
 use twenty_one_pro::{
     game::{Game, Phase},
-    model::{Card, HandKind, hand_value},
+    model::{Card, HandKind, Rank, Suit, hand_value},
     training::{Analytics, CellStats},
 };
 
@@ -18,7 +16,123 @@ pub const GOLD: Color32 = Color32::from_rgb(231, 184, 111);
 pub const RED: Color32 = Color32::from_rgb(231, 126, 115);
 const FELT: Color32 = Color32::from_rgb(20, 48, 45);
 
+struct CardAsset {
+    uri: &'static str,
+    bytes: &'static [u8],
+}
+
+macro_rules! card_asset {
+    ($name:tt) => {
+        CardAsset {
+            uri: concat!("bytes://21-pro/card/", stringify!($name), ".svg"),
+            bytes: include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/cards/",
+                stringify!($name),
+                ".svg"
+            )),
+        }
+    };
+}
+
+static CARD_ASSETS: [[CardAsset; 13]; 4] = [
+    [
+        card_asset!(Ac),
+        card_asset!(2c),
+        card_asset!(3c),
+        card_asset!(4c),
+        card_asset!(5c),
+        card_asset!(6c),
+        card_asset!(7c),
+        card_asset!(8c),
+        card_asset!(9c),
+        card_asset!(Tc),
+        card_asset!(Jc),
+        card_asset!(Qc),
+        card_asset!(Kc),
+    ],
+    [
+        card_asset!(Ad),
+        card_asset!(2d),
+        card_asset!(3d),
+        card_asset!(4d),
+        card_asset!(5d),
+        card_asset!(6d),
+        card_asset!(7d),
+        card_asset!(8d),
+        card_asset!(9d),
+        card_asset!(Td),
+        card_asset!(Jd),
+        card_asset!(Qd),
+        card_asset!(Kd),
+    ],
+    [
+        card_asset!(Ah),
+        card_asset!(2h),
+        card_asset!(3h),
+        card_asset!(4h),
+        card_asset!(5h),
+        card_asset!(6h),
+        card_asset!(7h),
+        card_asset!(8h),
+        card_asset!(9h),
+        card_asset!(Th),
+        card_asset!(Jh),
+        card_asset!(Qh),
+        card_asset!(Kh),
+    ],
+    [
+        card_asset!(As),
+        card_asset!(2s),
+        card_asset!(3s),
+        card_asset!(4s),
+        card_asset!(5s),
+        card_asset!(6s),
+        card_asset!(7s),
+        card_asset!(8s),
+        card_asset!(9s),
+        card_asset!(Ts),
+        card_asset!(Js),
+        card_asset!(Qs),
+        card_asset!(Ks),
+    ],
+];
+static CARD_BACK: CardAsset = card_asset!(back);
+
+const fn suit_index(suit: Suit) -> usize {
+    match suit {
+        Suit::Clubs => 0,
+        Suit::Diamonds => 1,
+        Suit::Hearts => 2,
+        Suit::Spades => 3,
+    }
+}
+
+const fn rank_index(rank: Rank) -> usize {
+    match rank {
+        Rank::Ace => 0,
+        Rank::Two => 1,
+        Rank::Three => 2,
+        Rank::Four => 3,
+        Rank::Five => 4,
+        Rank::Six => 5,
+        Rank::Seven => 6,
+        Rank::Eight => 7,
+        Rank::Nine => 8,
+        Rank::Ten => 9,
+        Rank::Jack => 10,
+        Rank::Queen => 11,
+        Rank::King => 12,
+    }
+}
+
+fn card_asset(card: Card) -> &'static CardAsset {
+    &CARD_ASSETS[suit_index(card.suit)][rank_index(card.rank)]
+}
+
 pub fn configure(ctx: &egui::Context) {
+    egui_extras::install_image_loaders(ctx);
+
     let mut style = egui::Style {
         visuals: egui::Visuals::dark(),
         ..Default::default()
@@ -118,56 +232,11 @@ pub fn units(half_units: i32) -> String {
 }
 
 fn paint_card(ui: &egui::Ui, rect: egui::Rect, card: Option<Card>) {
-    let painter = ui.painter();
-    if let Some(card) = card {
-        painter.rect_filled(rect, 6, Color32::from_rgb(244, 240, 225));
-        painter.rect_stroke(
-            rect,
-            6,
-            Stroke::new(1.0, Color32::from_rgb(204, 211, 203)),
-            StrokeKind::Inside,
-        );
-        let ink = if card.suit.is_red() {
-            Color32::from_rgb(174, 62, 57)
-        } else {
-            Color32::from_rgb(24, 40, 49)
-        };
-        painter.text(
-            rect.left_top() + vec2(7.0, 7.0),
-            Align2::LEFT_TOP,
-            card.rank.label(),
-            FontId::proportional(21.0),
-            ink,
-        );
-        painter.text(
-            rect.center() + vec2(1.0, 6.0),
-            Align2::CENTER_CENTER,
-            card.suit.symbol(),
-            FontId::proportional(31.0),
-            ink,
-        );
-    } else {
-        painter.rect_filled(rect, 6, Color32::from_rgb(35, 70, 69));
-        painter.rect_stroke(
-            rect,
-            6,
-            Stroke::new(1.5, Color32::from_rgb(97, 140, 126)),
-            StrokeKind::Inside,
-        );
-        painter.rect_stroke(
-            rect.shrink(6.0),
-            3,
-            Stroke::new(1.0, Color32::from_rgb(68, 104, 94)),
-            StrokeKind::Inside,
-        );
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "21",
-            FontId::proportional(25.0),
-            GOLD,
-        );
-    }
+    let asset = card.map(card_asset).unwrap_or(&CARD_BACK);
+    egui::Image::from_bytes(asset.uri, asset.bytes)
+        .fit_to_exact_size(rect.size())
+        .corner_radius(6)
+        .paint_at(ui, rect);
 }
 fn cards(ui: &mut egui::Ui, cards: &[Card], hide_hole: bool) {
     let count = cards.len().max(2);
@@ -544,5 +613,28 @@ pub fn category_bars(ui: &mut egui::Ui, analytics: &Analytics) {
             .color(MUTED),
         );
         ui.add(egui::ProgressBar::new(rate).fill(GOLD).desired_height(7.0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_card_assets_load_as_svg_images() {
+        egui::__run_test_ui(|ui| {
+            egui_extras::install_image_loaders(ui.ctx());
+            for asset in CARD_ASSETS
+                .iter()
+                .flatten()
+                .chain(std::iter::once(&CARD_BACK))
+            {
+                let image = egui::Image::from_bytes(asset.uri, asset.bytes);
+                let texture = image
+                    .load_for_size(ui.ctx(), vec2(52.0, 74.0))
+                    .unwrap_or_else(|error| panic!("{} failed: {error}", asset.uri));
+                assert!(texture.is_ready(), "{} is still loading", asset.uri);
+            }
+        });
     }
 }

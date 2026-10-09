@@ -4,6 +4,10 @@
 
 These instructions apply to the whole repository. The project is a Rust 2024 desktop application and library; preserve the separation between blackjack mechanics, learning logic, persistence, and the desktop renderer.
 
+## Worktree workflow
+
+Implementation and repository edits for this codebase MUST be performed by an omp agent in a separate Orca-managed worktree. The coordinating/original checkout remains read-only; merge back only on explicit user request. An agent already assigned to this isolated worktree implements there without spawning another worktree.
+
 ## Rust API design
 
 Use the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/) as the default for public and cross-module Rust APIs. Apply the relevant rule rather than copying the upstream checklist mechanically:

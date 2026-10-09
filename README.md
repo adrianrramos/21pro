@@ -4,6 +4,8 @@ An offline, native Rust desktop app for learning blackjack basic strategy. Play 
 
 All application code—including the UI, blackjack engine, analytics, scheduler, and persistence—is Rust. There is no JavaScript frontend, WebView, server, account, or telemetry. Rust dependencies still use the operating system's native graphics, windowing, and accessibility APIs.
 
+Playing-card faces and backs use bundled SVG artwork exported from the full [CardMeister](https://cardmeister.github.io/index.html?full) set. The assets are rendered natively with egui's SVG loader and cached by egui; the app does not use a webview or fetch artwork at runtime. See [`assets/cards/README.md`](assets/cards/README.md) for the upstream revision and Unlicense provenance.
+
 ## Run on your Mac
 
 Requirements: macOS 12 or newer, Xcode Command Line Tools, and Rust **1.95 or newer**. Both Apple Silicon and Intel Macs use the same source.
