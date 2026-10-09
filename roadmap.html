@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>21 Pro — Roadmap</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #202124; background-color: #ffffff; }
+    a { color: #174ea6; }
+    @media (prefers-color-scheme: dark) {
+      :root { color-scheme: dark; color: #e8eaed; background-color: #181a1b; }
+      a { color: #8ab4f8; }
+    }
+    body { max-width: 48rem; margin: 3rem auto; padding: 0 1.25rem; line-height: 1.6; }
+    h1, h2, h3 { line-height: 1.2; }
+    article { border: 1px solid currentColor; border-radius: .5rem; padding: 1.5rem; }
+    article h3 { margin-top: 0; }
+    code { overflow-wrap: anywhere; }
+    footer { margin-top: 2rem; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>21 Pro — Roadmap</h1>
+    <p>Planned work for future versions. Items here are not commitments to a release date.</p>
+    <p><a href="README.md">Project README</a></p>
+  </header>
+  <main>
+    <h2>Future version · Unscheduled</h2>
+    <article aria-labelledby="homebrew-title">
+      <h3 id="homebrew-title">Homebrew installation for macOS</h3>
+      <p><strong>Status:</strong> Deferred. No Homebrew packaging has been implemented.</p>
+      <p><strong>Goal:</strong> Install 21 Pro as a Finder-launchable app without requiring users to install Rust or compile the project.</p>
+      <p><strong>Proposed approach:</strong> Distribute prebuilt macOS releases through a Homebrew cask in a project-owned tap. Inclusion in Homebrew’s official repositories is not required.</p>
+      <h4>Remaining work</h4>
+      <ul>
+        <li>Build and verify macOS app bundles for Apple Silicon and Intel, using separate archives or a universal app.</li>
+        <li>Set up signing and notarization for public distribution.</li>
+        <li>Publish versioned ZIP or DMG assets on GitHub Releases.</li>
+        <li>Create a Homebrew tap and cask with release URLs, SHA-256 checksums, and the supported macOS version.</li>
+        <li>Verify installation, launching, upgrades, and uninstallation on macOS.</li>
+        <li>Document the published installation commands in the README.</li>
+      </ul>
+      <p><strong>Current starting point:</strong> The repository contains app-bundle metadata and local build instructions. The README records macOS launching, bundling, and signing/notarization as unverified.</p>
+      <p>Reference: <a href="https://docs.brew.sh/Cask-Cookbook">Homebrew Cask Cookbook</a>.</p>
+    </article>
+    <article aria-labelledby="hand-values-title">
+      <h3 id="hand-values-title">Optional hand-value display</h3>
+      <p><strong>Status:</strong> Planned. Add a setting that controls whether the current hand value is shown.</p>
+      <p><strong>Goal:</strong> When hand values are hidden, require the user to total the cards mentally instead of relying on the software's calculation.</p>
+      <h4>Acceptance intent</h4>
+      <ul>
+        <li>Users can turn the hand-value display on or off before or during practice.</li>
+        <li>When disabled, no hand value is shown anywhere in the active practice view.</li>
+        <li>Re-enabling the setting restores the normal hand-value display.</li>
+      </ul>
+    </article>
+    <article aria-labelledby="hand-focus-title">
+      <h3 id="hand-focus-title">Focused hand-type practice</h3>
+      <p><strong>Status:</strong> Planned. Let users focus practice on specific hand types instead of receiving an unrestricted mix.</p>
+      <p><strong>Goal:</strong> Support targeted practice such as soft hands, splits, doubles, and other hand categories as they are added.</p>
+      <h4>Acceptance intent</h4>
+      <ul>
+        <li>Users can select one or more hand types to practice.</li>
+        <li>Dealt scenarios respect the selected hand-type focus.</li>
+        <li>Focused practice results are recorded in the user's playing history with the relevant hand type.</li>
+      </ul>
+    </article>
+    <article aria-labelledby="running-count-title">
+      <h3 id="running-count-title">Running-count checks</h3>
+      <p><strong>Status:</strong> Planned. Periodically test whether the user is maintaining the running count accurately during play.</p>
+      <p><strong>Goal:</strong> After every 10–15 hands, prompt the user to enter the running count and verify the answer against the correct count.</p>
+      <h4>Acceptance intent</h4>
+      <ul>
+        <li>The software prompts for the running count at 10–15-hand intervals during a counting session.</li>
+        <li>Each response is marked correct or incorrect against the actual running count.</li>
+        <li>Running-count accuracy is recorded as a new insight metric for the user's progress.</li>
+      </ul>
+    </article>
+  </main>
+  <footer>Last updated: <time datetime="2026-10-09">October 9, 2026</time>.</footer>
+</body>
+</html>
