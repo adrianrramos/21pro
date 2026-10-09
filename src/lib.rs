@@ -1,4 +1,5 @@
 //! Blackjack mechanics and learning logic are independent of the desktop renderer.
+pub mod counting;
 pub mod game;
 pub mod model;
 pub mod storage;

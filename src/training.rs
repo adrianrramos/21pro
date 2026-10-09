@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::counting::CountingRecord;
 use crate::model::{ASSESSMENT_ROUNDS, Action, HandKind, RULESET_ID, Situation};
 use crate::strategy::recommendation;
 
@@ -98,6 +99,8 @@ pub struct Profile {
     pub attempts: Vec<Attempt>,
     // A vector keeps structured Situation keys JSON-compatible.
     pub reviews: Vec<ReviewState>,
+    #[serde(default)]
+    pub counting_history: Vec<CountingRecord>,
 }
 
 impl Default for Profile {
@@ -108,6 +111,7 @@ impl Default for Profile {
             rounds: Vec::new(),
             attempts: Vec::new(),
             reviews: Vec::new(),
+            counting_history: Vec::new(),
         }
     }
 }
@@ -179,6 +183,15 @@ impl Profile {
     pub fn record_round(&mut self, at: i64, net_half_units: i32) {
         assert!(at >= 0, "negative round timestamp");
         self.rounds.push(RoundRecord { at, net_half_units });
+    }
+
+    /// Save one completed, correct card-counting trial.
+    pub fn record_counting_trial(&mut self, completed_at: i64, duration_ms: u64) {
+        assert!(completed_at >= 0, "negative counting completion timestamp");
+        self.counting_history.push(CountingRecord {
+            completed_at,
+            duration_ms,
+        });
     }
 
     pub fn rounds_played(&self) -> usize {

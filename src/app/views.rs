@@ -1,11 +1,21 @@
+use std::time::Duration;
+
 use super::{Command, Page, TrainerApp, now, widgets as w};
 use eframe::egui::{self, RichText, Stroke, vec2};
 use twenty_one_pro::{
+    counting::{TRIAL_SIZE, format_completed_at, sorted_history},
     game::Phase,
     model::{ASSESSMENT_ROUNDS, HandKind},
     strategy,
     training::StudyMode,
 };
+
+fn format_duration(duration: Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes:02}:{seconds:02}.{:03}", duration.subsec_millis())
+}
 
 impl TrainerApp {
     pub(super) fn sidebar(&mut self, root: &mut egui::Ui) {
@@ -25,7 +35,8 @@ impl TrainerApp {
                     (Page::Table, "01", "The table"),
                     (Page::Insights, "02", "Your insights"),
                     (Page::Practice, "03", "Practice"),
-                    (Page::Rules, "04", "Rules"),
+                    (Page::Counting, "04", "Card counting"),
+                    (Page::Rules, "05", "Rules"),
                 ] {
                     let selected = self.page == page;
                     let label = format!("{number}   {title}");
@@ -46,7 +57,7 @@ impl TrainerApp {
                         self.page = page;
                     }
                 }
-                ui.add_space((ui.available_height() - 230.0).max(24.0));
+                ui.add_space((ui.available_height() - 274.0).max(24.0));
                 w::eyebrow(ui, "YOUR BASELINE");
                 ui.label(
                     RichText::new(format!("{} rounds", self.profile.rounds_played()))
@@ -451,6 +462,129 @@ impl TrainerApp {
             ui.label(RichText::new("How repetition works").strong());
             ui.label("Miss: review in 10 minutes. Due correct reviews: 1 day, then 6 days, then gradually longer. Miss again and the situation returns to relearning.");
             w::muted(ui, "This uses an SM-2-style scheduler. It is inspired by spaced-repetition study, not Anki synchronization or modern Anki's FSRS algorithm.");
+        });
+    }
+
+    pub(super) fn counting_view(&mut self, ui: &mut egui::Ui, command: &mut Option<Command>) {
+        w::heading(
+            ui,
+            "Count the shoe",
+            "Hi-Lo practice. Six decks. One card at a time.",
+        );
+        if self.counting.is_none() {
+            w::panel().show(ui, |ui| {
+                w::eyebrow(ui, "READY WHEN YOU ARE");
+                ui.label(RichText::new("52 cards. No hints.").size(24.0).strong());
+                ui.label("A fresh six-deck shoe is shuffled for every trial. Cards are dealt without replacement, so identical rank and suit cards can appear.");
+                ui.add_space(8.0);
+                if w::primary(ui, "Start trial").clicked() {
+                    *command = Some(Command::StartCounting);
+                }
+            });
+        } else {
+            let (card, seen, complete) = self
+                .counting
+                .as_ref()
+                .map(|trial| {
+                    (
+                        trial.current_card(),
+                        trial.cards_seen(),
+                        trial.is_complete(),
+                    )
+                })
+                .unwrap_or((None, 0, false));
+            let elapsed = self.counting_duration();
+            ui.horizontal(|ui| {
+                w::eyebrow(ui, &format!("{seen} / {TRIAL_SIZE} CARDS"));
+                ui.label(RichText::new(format_duration(elapsed)).strong());
+            });
+            ui.add_space(10.0);
+            w::panel().show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    if let Some(card) = card {
+                        w::counting_card(ui, card);
+                    }
+                });
+            });
+            ui.add_space(12.0);
+            if self.counting_assessment.is_none() && self.counting_elapsed.is_none() {
+                if complete {
+                    if w::primary(ui, "Finish").clicked() {
+                        *command = Some(Command::FinishCounting);
+                    }
+                    w::muted(ui, "The final card stays visible until you finish.");
+                } else if w::primary(ui, "Next").clicked() {
+                    *command = Some(Command::NextCounting);
+                }
+            } else if let Some(assessment) = &self.counting_assessment {
+                let color = if assessment.correct { w::GREEN } else { w::RED };
+                w::panel().stroke(Stroke::new(1.0, color)).show(ui, |ui| {
+                    ui.label(
+                        RichText::new(if assessment.correct {
+                            "Correct"
+                        } else {
+                            "Incorrect"
+                        })
+                        .size(24.0)
+                        .strong()
+                        .color(color),
+                    );
+                    ui.label(format!("Submitted count: {:+}", assessment.submitted));
+                    ui.label(format!("Actual count: {:+}", assessment.actual));
+                    if assessment.correct {
+                        w::muted(ui, "This completed trial was saved.");
+                    } else {
+                        w::muted(ui, "Incorrect trials are not saved.");
+                    }
+                    if w::primary(ui, "Start new trial").clicked() {
+                        *command = Some(Command::StartCounting);
+                    }
+                });
+            } else {
+                w::panel().show(ui, |ui| {
+                    w::eyebrow(ui, "FINAL COUNT");
+                    ui.label("Enter the running count after the last card.");
+                    let response = ui.text_edit_singleline(&mut self.counting_input);
+                    if response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    {
+                        *command = Some(Command::SubmitCounting);
+                    }
+                    if let Some(error) = &self.counting_input_error {
+                        ui.colored_label(w::RED, error);
+                    }
+                    if w::primary(ui, "Submit count").clicked() {
+                        *command = Some(Command::SubmitCounting);
+                    }
+                });
+            }
+        }
+        ui.add_space(18.0);
+        w::panel().show(ui, |ui| {
+            ui.label(RichText::new("Saved trials").size(20.0).strong());
+            let history = sorted_history(&self.profile.counting_history);
+            if history.is_empty() {
+                w::muted(
+                    ui,
+                    "Correct trials will appear here, shortest duration first.",
+                );
+            } else {
+                egui::Grid::new("counting-history")
+                    .num_columns(3)
+                    .spacing(vec2(24.0, 8.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Duration").color(w::MUTED));
+                        ui.label(RichText::new("Completed").color(w::MUTED));
+                        ui.label(RichText::new("Result").color(w::MUTED));
+                        ui.end_row();
+                        for record in history {
+                            ui.label(format_duration(Duration::from_millis(record.duration_ms)));
+                            ui.label(format_completed_at(record.completed_at));
+                            ui.colored_label(w::GREEN, "Correct");
+                            ui.end_row();
+                        }
+                    });
+            }
         });
     }
 

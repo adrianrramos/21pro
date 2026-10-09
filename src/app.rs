@@ -7,9 +7,10 @@ use eframe::egui;
 use std::{
     collections::VecDeque,
     path::PathBuf,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use twenty_one_pro::{
+    counting::{CountingTrial, parse_submitted_count},
     game::{Game, Phase},
     model::{Action, HandKind, Situation},
     storage::{self, Store},
@@ -22,6 +23,7 @@ enum Page {
     Table,
     Insights,
     Practice,
+    Counting,
     Rules,
 }
 
@@ -37,11 +39,21 @@ impl Feedback {
     }
 }
 
+struct CountingAssessment {
+    submitted: i32,
+    actual: i32,
+    correct: bool,
+}
+
 enum Command {
     Deal,
     Act(Action),
     StartPractice(Vec<Situation>),
     NextPractice,
+    StartCounting,
+    NextCounting,
+    FinishCounting,
+    SubmitCounting,
     RetrySave,
 }
 
@@ -64,6 +76,12 @@ pub struct TrainerApp {
     practice_completed: usize,
     practice_start_attempt: usize,
     practice_target: Option<Situation>,
+    counting: Option<CountingTrial>,
+    counting_started_at: Option<Instant>,
+    counting_elapsed: Option<Duration>,
+    counting_input: String,
+    counting_input_error: Option<String>,
+    counting_assessment: Option<CountingAssessment>,
     filter: Option<StudyMode>,
     analytics: Analytics,
     table_stats: CellStats,
@@ -125,6 +143,12 @@ impl TrainerApp {
             practice_completed: 0,
             practice_start_attempt: 0,
             practice_target: None,
+            counting: None,
+            counting_started_at: None,
+            counting_elapsed: None,
+            counting_input: String::new(),
+            counting_input_error: None,
+            counting_assessment: None,
             filter: Some(StudyMode::Table),
             analytics,
             table_stats,
@@ -132,6 +156,27 @@ impl TrainerApp {
             selected_cell: None,
             just_unlocked: false,
         }
+    }
+
+    fn counting_duration(&self) -> Duration {
+        self.counting_elapsed
+            .or_else(|| self.counting_started_at.map(|started| started.elapsed()))
+            .unwrap_or_default()
+    }
+
+    fn reset_counting_trial(&mut self) {
+        let mut trial = CountingTrial::new(rand::random());
+        if let Err(error) = trial.start() {
+            self.error = Some(format!("Cannot start card-counting trial: {error}"));
+            return;
+        }
+        self.counting = Some(trial);
+        self.counting_started_at = Some(Instant::now());
+        self.counting_elapsed = None;
+        self.counting_input.clear();
+        self.counting_input_error = None;
+        self.counting_assessment = None;
+        self.error = None;
     }
 
     fn refresh_analytics(&mut self) {
@@ -275,6 +320,57 @@ impl TrainerApp {
                 self.start_next_practice();
             }
             Command::NextPractice => self.start_next_practice(),
+            Command::StartCounting => self.reset_counting_trial(),
+            Command::NextCounting => {
+                if let Some(trial) = self.counting.as_mut()
+                    && !trial.is_complete()
+                    && let Err(error) = trial.next_card()
+                {
+                    self.error = Some(format!("Cannot reveal the next card: {error}"));
+                }
+            }
+            Command::FinishCounting => {
+                if self
+                    .counting
+                    .as_ref()
+                    .is_some_and(CountingTrial::is_complete)
+                {
+                    self.counting_elapsed = self
+                        .counting_started_at
+                        .take()
+                        .map(|started| started.elapsed());
+                    self.counting_input_error = None;
+                }
+            }
+            Command::SubmitCounting => {
+                if self.counting_assessment.is_some() {
+                    return;
+                }
+                let Some(submitted) = parse_submitted_count(&self.counting_input) else {
+                    self.counting_input_error =
+                        Some("Enter a signed whole number, such as +3 or -2.".to_owned());
+                    return;
+                };
+                let Some(trial) = self.counting.as_ref() else {
+                    return;
+                };
+                let Some(elapsed) = self.counting_elapsed else {
+                    return;
+                };
+                let actual = trial.actual_count();
+                let correct = submitted == actual;
+                self.counting_input_error = None;
+                self.counting_assessment = Some(CountingAssessment {
+                    submitted,
+                    actual,
+                    correct,
+                });
+                if correct {
+                    self.profile
+                        .record_counting_trial(now(), elapsed.as_millis() as u64);
+                    self.persist_progress();
+                }
+            }
             Command::RetrySave => unreachable!(),
         }
     }
@@ -319,7 +415,11 @@ impl TrainerApp {
 impl eframe::App for TrainerApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
-        ctx.request_repaint_after(Duration::from_secs(30));
+        ctx.request_repaint_after(if self.counting_started_at.is_some() {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(30)
+        });
         if self.dirty && !self.allow_close && ctx.input(|input| input.viewport().close_requested())
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -378,6 +478,7 @@ impl eframe::App for TrainerApp {
                         Page::Table => self.table_view(ui, &mut command),
                         Page::Insights => self.insights_view(ui, &mut command),
                         Page::Practice => self.practice_view(ui, &mut command),
+                        Page::Counting => self.counting_view(ui, &mut command),
                         Page::Rules => self.rules_view(ui),
                     }
                 });
