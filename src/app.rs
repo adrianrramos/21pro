@@ -392,15 +392,18 @@ impl TrainerApp {
                 return None;
             }
             if self.page == Page::Counting {
-                let can_advance = self
-                    .counting
-                    .as_ref()
-                    .is_some_and(|trial| !trial.is_complete());
-                return (can_advance
+                let trial = self.counting.as_ref()?;
+                if input.key_pressed(egui::Key::Space)
                     && self.counting_elapsed.is_none()
                     && self.counting_assessment.is_none()
-                    && input.key_pressed(egui::Key::Space))
-                .then_some(Command::NextCounting);
+                {
+                    return Some(if trial.is_complete() {
+                        Command::FinishCounting
+                    } else {
+                        Command::NextCounting
+                    });
+                }
+                return None;
             }
             let game = match self.page {
                 Page::Table => &self.table,
@@ -615,13 +618,7 @@ mod tests {
         let reopened = Store::open(&path).unwrap();
         assert_eq!(reopened.load().unwrap().counting_history.len(), 1);
     }
-    #[test]
-    fn spacebar_dispatches_next_for_an_active_counting_trial() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("profile.redb");
-        let store = Store::open(&path).unwrap();
-        let mut app = test_app(store);
-        app.reset_counting_trial_with_seed(42);
+    fn spacebar_context() -> egui::Context {
         let context = egui::Context::default();
         let mut output = context.run_ui(
             egui::RawInput {
@@ -637,11 +634,34 @@ mod tests {
             |_| {},
         );
         output.textures_delta.clear();
+        context
+    }
+
+    #[test]
+    fn spacebar_dispatches_next_and_finish_for_counting_trial() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("profile.redb");
+        let store = Store::open(&path).unwrap();
+        let mut app = test_app(store);
+        app.reset_counting_trial_with_seed(42);
+
+        let context = spacebar_context();
         assert!(matches!(
             app.shortcut(&context),
             Some(Command::NextCounting)
         ));
         app.execute(Command::NextCounting);
-        assert_eq!(app.counting.as_ref().unwrap().cards_seen(), 2);
+        for _ in 2..TRIAL_SIZE {
+            app.execute(Command::NextCounting);
+        }
+        assert_eq!(app.counting.as_ref().unwrap().cards_seen(), TRIAL_SIZE);
+
+        let context = spacebar_context();
+        assert!(matches!(
+            app.shortcut(&context),
+            Some(Command::FinishCounting)
+        ));
+        app.execute(Command::FinishCounting);
+        assert!(app.counting_elapsed.is_some());
     }
 }

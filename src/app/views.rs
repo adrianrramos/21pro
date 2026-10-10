@@ -509,7 +509,7 @@ impl TrainerApp {
             ui.add_space(12.0);
             if self.counting_assessment.is_none() && self.counting_elapsed.is_none() {
                 if complete {
-                    if w::primary(ui, "Finish").clicked() {
+                    if w::primary(ui, "Finish  [Space]").clicked() {
                         *command = Some(Command::FinishCounting);
                     }
                     w::muted(ui, "The final card stays visible until you finish.");
