@@ -300,6 +300,14 @@ mod tests {
         }
         write.commit().unwrap();
     }
+    fn raw_free_play_snapshot(store: &Store, json: &[u8]) {
+        let write = store.database.begin_write().unwrap();
+        {
+            let mut table = write.open_table(FREE_PLAY).unwrap();
+            table.insert(PROFILE_KEY, json).unwrap();
+        }
+        write.commit().unwrap();
+    }
 
     #[test]
     fn on_disk_roundtrip_preserves_contexts_progress_and_reviews() {
@@ -394,12 +402,11 @@ mod tests {
         store.save(&profile).unwrap();
         let mut invalid = serde_json::to_value(PlaySession::new(13)).unwrap();
         invalid["schema_version"] = serde_json::json!(99);
-        let invalid: PlaySession = serde_json::from_value(invalid).unwrap();
+        raw_free_play_snapshot(&store, &serde_json::to_vec(&invalid).unwrap());
         assert!(matches!(
-            store.save_all(&profile, Some(&invalid)),
+            store.load_free_play(),
             Err(StorageError::Corrupt(_))
         ));
-        assert!(store.load_free_play().unwrap().is_none());
         assert_eq!(store.load().unwrap().rounds_played(), 0);
     }
 

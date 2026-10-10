@@ -95,7 +95,7 @@ pub struct GameSnapshot {
     pub splits_used: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Game {
     /// Upcard first; the renderer must conceal index 1 until Phase::Finished.
     pub dealer: Vec<Card>,
@@ -109,6 +109,40 @@ pub struct Game {
     insured: bool,
     // Practice may reserve prior split capacity without inventing extra hands.
     splits_used: usize,
+}
+
+#[derive(Deserialize)]
+struct GameWire {
+    dealer: Vec<Card>,
+    hands: Vec<PlayerHand>,
+    active: usize,
+    phase: Phase,
+    result: Option<RoundResult>,
+    shoe: Vec<Card>,
+    insured: bool,
+    splits_used: usize,
+}
+
+impl<'de> Deserialize<'de> for Game {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = GameWire::deserialize(deserializer)?;
+        let game = Self {
+            dealer: wire.dealer,
+            hands: wire.hands,
+            active: wire.active,
+            phase: wire.phase,
+            result: wire.result,
+            shoe: wire.shoe,
+            rng: default_rng(),
+            insured: wire.insured,
+            splits_used: wire.splits_used,
+        };
+        game.validate().map_err(serde::de::Error::custom)?;
+        Ok(game)
+    }
 }
 
 fn default_rng() -> SmallRng {
@@ -640,6 +674,10 @@ fn validate_game_state(state: GameState<'_>) -> Result<(), GameError> {
             "round result total does not match its outcomes".to_owned(),
         ));
     }
+    let prior_hand_playing = active < hands.len()
+        && hands[..active]
+            .iter()
+            .any(|hand| hand.status == HandStatus::Playing);
     match phase {
         Phase::Ready => {
             if !dealer.is_empty()
@@ -661,7 +699,13 @@ fn validate_game_state(state: GameState<'_>) -> Result<(), GameError> {
                 || result.is_some()
                 || shoe.is_empty()
                 || hands[active].status != HandStatus::Playing
-                || (phase == Phase::Insurance && insured)
+                || prior_hand_playing
+                || (phase == Phase::Insurance
+                    && (dealer[0].rank != Rank::Ace
+                        || hands.len() != 1
+                        || active != 0
+                        || splits_used != 0
+                        || insured))
             {
                 return Err(GameError::InvalidSnapshot(
                     "active game is missing round state".to_owned(),
@@ -760,6 +804,20 @@ mod tests {
         push.act(Action::DeclineInsurance).unwrap();
         assert_eq!(net(&push), 0);
         assert!(push.result.unwrap().dealer_blackjack);
+    }
+    #[test]
+    fn deserializing_invalid_game_rejects_before_state_use() {
+        let mut value = serde_json::to_value(Game::new(1)).unwrap();
+        value["phase"] = serde_json::json!("Playing");
+        assert!(serde_json::from_value::<Game>(value).is_err());
+    }
+
+    #[test]
+    fn insurance_snapshot_requires_an_ace_upcard() {
+        let mut snapshot = rig(&[5, 6, 10, 9]).snapshot();
+        snapshot.phase = Phase::Insurance;
+        snapshot.dealer[0].rank = Rank::Ten;
+        assert!(Game::from_snapshot(snapshot).is_err());
     }
 
     #[test]

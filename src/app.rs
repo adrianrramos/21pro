@@ -500,7 +500,11 @@ impl TrainerApp {
                 let situation = self.play.game().situation()?;
                 ACTION_SHORTCUTS
                     .into_iter()
-                    .find(|(key, action)| input.key_pressed(*key) && situation.allows(*action))
+                    .find(|(key, action)| {
+                        input.key_pressed(*key)
+                            && situation.allows(*action)
+                            && self.play.can_afford(*action)
+                    })
                     .map(|(_, action)| Command::PlayAct(action))
             });
         }

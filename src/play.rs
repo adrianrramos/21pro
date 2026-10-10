@@ -55,7 +55,7 @@ pub enum PlayError {
 ///
 /// Monetary values are integer cents. The game, wager, funds, graph, and
 /// settlement flag are saved together and validated before storage.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PlaySession {
     schema_version: u32,
     starting_bankroll_cents: i64,
@@ -67,6 +67,43 @@ pub struct PlaySession {
     history: Vec<PlayPoint>,
     game: Game,
     round_settled: bool,
+}
+
+#[derive(Deserialize)]
+struct PlaySessionWire {
+    schema_version: u32,
+    starting_bankroll_cents: i64,
+    available_cents: i64,
+    committed_cents: i64,
+    pending_wager_cents: i64,
+    wager_chips: Vec<i64>,
+    locked_wager_cents: Option<i64>,
+    history: Vec<PlayPoint>,
+    game: Game,
+    round_settled: bool,
+}
+
+impl<'de> Deserialize<'de> for PlaySession {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = PlaySessionWire::deserialize(deserializer)?;
+        let session = Self {
+            schema_version: wire.schema_version,
+            starting_bankroll_cents: wire.starting_bankroll_cents,
+            available_cents: wire.available_cents,
+            committed_cents: wire.committed_cents,
+            pending_wager_cents: wire.pending_wager_cents,
+            wager_chips: wire.wager_chips,
+            locked_wager_cents: wire.locked_wager_cents,
+            history: wire.history,
+            game: wire.game,
+            round_settled: wire.round_settled,
+        };
+        session.validate().map_err(serde::de::Error::custom)?;
+        Ok(session)
+    }
 }
 
 impl PlaySession {
@@ -355,12 +392,49 @@ impl PlaySession {
                 }
             }
             Phase::Finished => {
-                if !self.round_settled
-                    || self.committed_cents != 0
-                    || self.locked_wager_cents.is_none()
-                {
+                let Some(wager) = self.locked_wager_cents else {
+                    return Err(PlayError::InvalidSnapshot(
+                        "settled game has no locked wager".to_owned(),
+                    ));
+                };
+                let Some(result) = self.game.result.as_ref() else {
+                    return Err(PlayError::InvalidSnapshot(
+                        "settled game has no result".to_owned(),
+                    ));
+                };
+                if !self.round_settled || self.committed_cents != 0 {
                     return Err(PlayError::InvalidSnapshot(
                         "settled funds are inconsistent".to_owned(),
+                    ));
+                }
+                let Some(previous) = self.history.get(self.history.len().saturating_sub(2)) else {
+                    return Err(PlayError::InvalidSnapshot(
+                        "settled history is missing its prior point".to_owned(),
+                    ));
+                };
+                let last = self.history.last().expect("history checked above");
+                let net = wager
+                    .checked_mul(i64::from(result.net_half_units))
+                    .ok_or(PlayError::MoneyOverflow)?
+                    / 2;
+                let expected_round = previous
+                    .round
+                    .checked_add(1)
+                    .ok_or(PlayError::MoneyOverflow)?;
+                let expected_cumulative = previous
+                    .cumulative_net_cents
+                    .checked_add(net)
+                    .ok_or(PlayError::MoneyOverflow)?;
+                let expected_bankroll = previous
+                    .bankroll_cents
+                    .checked_add(net)
+                    .ok_or(PlayError::MoneyOverflow)?;
+                if last.round != expected_round
+                    || last.cumulative_net_cents != expected_cumulative
+                    || last.bankroll_cents != expected_bankroll
+                {
+                    return Err(PlayError::InvalidSnapshot(
+                        "settled history does not match the game result".to_owned(),
                     ));
                 }
             }
@@ -605,6 +679,16 @@ mod tests {
         assert_eq!(restored.available_cents, 100_750);
         assert_eq!(restored.committed_cents, 0);
     }
+    #[test]
+    fn serialized_finished_round_requires_its_settlement_point() {
+        let mut session = prepared_session(&[11, 10], &[10, 6]);
+        session.act(Action::Stand).unwrap();
+        let mut value = serde_json::to_value(&session).unwrap();
+        let first = value["history"][0].clone();
+        value["history"] = serde_json::json!([first]);
+        assert!(serde_json::from_value::<PlaySession>(value).is_err());
+    }
+
     #[test]
     fn finished_round_can_build_and_validate_the_next_wager() {
         let mut session = prepared_session(&[11, 10], &[10, 6]);
