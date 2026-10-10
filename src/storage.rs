@@ -14,6 +14,8 @@ use crate::training::{Profile, SCHEMA_VERSION, valid_situation};
 const PROFILE: TableDefinition<&str, &[u8]> = TableDefinition::new("profile");
 const PROFILE_KEY: &str = "current";
 
+const LEGACY_SCHEMA_VERSION: u64 = 1;
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("Cannot determine the application data directory")]
@@ -105,8 +107,11 @@ impl Store {
                 StorageError::Corrupt("schema_version is missing or invalid".to_owned())
             })?;
         check_version(version)?;
-        let profile: Profile = serde_json::from_value(value)
+        let mut profile: Profile = serde_json::from_value(value)
             .map_err(|error| StorageError::Corrupt(error.to_string()))?;
+        if version == LEGACY_SCHEMA_VERSION {
+            profile.schema_version = SCHEMA_VERSION;
+        }
         validate(&profile)?;
         Ok(profile)
     }
@@ -136,7 +141,7 @@ fn database_error(error: impl std::fmt::Display) -> StorageError {
 }
 
 fn check_version(version: u64) -> Result<(), StorageError> {
-    if version != u64::from(SCHEMA_VERSION) {
+    if version != LEGACY_SCHEMA_VERSION && version != u64::from(SCHEMA_VERSION) {
         return Err(StorageError::Version {
             found: version,
             supported: SCHEMA_VERSION,
@@ -146,7 +151,12 @@ fn check_version(version: u64) -> Result<(), StorageError> {
 }
 
 fn validate(profile: &Profile) -> Result<(), StorageError> {
-    check_version(u64::from(profile.schema_version))?;
+    if profile.schema_version != SCHEMA_VERSION {
+        return Err(StorageError::Version {
+            found: u64::from(profile.schema_version),
+            supported: SCHEMA_VERSION,
+        });
+    }
     if profile.ruleset_id != RULESET_ID {
         return Err(StorageError::Ruleset {
             found: profile.ruleset_id.clone(),
@@ -154,8 +164,13 @@ fn validate(profile: &Profile) -> Result<(), StorageError> {
         });
     }
     let corrupt = |message: &str| StorageError::Corrupt(message.to_owned());
-    if profile.rounds.iter().any(|round| round.at < 0) {
-        return Err(corrupt("negative round timestamp"));
+    if profile.rounds.iter().any(|round| round.at < 0)
+        || profile
+            .counting_history
+            .iter()
+            .any(|trial| trial.completed_at < 0)
+    {
+        return Err(corrupt("negative completion timestamp"));
     }
     // Keep validation linearithmic, not a replay of every scheduling update.
     let mut counts = BTreeMap::<Situation, (u32, u32)>::new();
@@ -217,7 +232,7 @@ fn validate(profile: &Profile) -> Result<(), StorageError> {
 mod tests {
     use super::*;
     use crate::model::{Action, HandKind};
-    use crate::training::StudyMode;
+    use crate::training::{Attempt, StudyMode};
 
     fn situation() -> Situation {
         Situation {
@@ -258,6 +273,7 @@ mod tests {
         }
         profile.record_attempt(original, Action::Stand, 1000, StudyMode::Table);
         profile.record_attempt(after_hit, Action::Stand, 1100, StudyMode::Practice);
+        profile.record_counting_trial(1200, 3456);
         store.save(&profile).unwrap();
         let before = serde_json::to_value(&profile).unwrap();
         drop(store);
@@ -267,12 +283,102 @@ mod tests {
         assert_eq!(loaded.rounds_played(), 250);
         assert!(loaded.assessment_unlocked());
         assert_eq!(loaded.reviews.len(), 2);
+        assert_eq!(loaded.counting_history.len(), 1);
+        assert_eq!(loaded.counting_history[0].duration_ms, 3456);
         assert_eq!(loaded.due_count(1600), 1);
         assert_eq!(loaded.practice_queue(1800, 10), vec![original, after_hit]);
         assert_eq!(
             loaded.analytics(None).cells[&(HandKind::Hard, 16, 10)].attempts,
             2
         );
+    }
+
+    #[test]
+    fn older_profiles_without_counting_history_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("profile.redb")).unwrap();
+        let mut legacy = Profile::default();
+        legacy.record_round(42, 3);
+        legacy.record_attempt(situation(), Action::Stand, 100, StudyMode::Table);
+        let expected_rounds = serde_json::to_value(&legacy.rounds).unwrap();
+        let expected_attempts = serde_json::to_value(&legacy.attempts).unwrap();
+        let expected_reviews = serde_json::to_value(&legacy.reviews).unwrap();
+        let mut snapshot = serde_json::to_value(legacy).unwrap();
+        snapshot.as_object_mut().unwrap().remove("counting_history");
+        snapshot["schema_version"] = serde_json::json!(1);
+        raw_snapshot(&store, &serde_json::to_vec(&snapshot).unwrap());
+        let mut loaded = store.load().unwrap();
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            serde_json::to_value(&loaded.rounds).unwrap(),
+            expected_rounds
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded.attempts).unwrap(),
+            expected_attempts
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded.reviews).unwrap(),
+            expected_reviews
+        );
+        assert!(loaded.counting_history.is_empty());
+        store.save(&loaded).unwrap();
+        loaded = store.load().unwrap();
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            serde_json::to_value(&loaded.rounds).unwrap(),
+            expected_rounds
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded.attempts).unwrap(),
+            expected_attempts
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded.reviews).unwrap(),
+            expected_reviews
+        );
+    }
+
+    #[test]
+    fn negative_counting_completion_is_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("profile.redb")).unwrap();
+        let mut profile = Profile::default();
+        profile
+            .counting_history
+            .push(crate::counting::CountingRecord {
+                completed_at: -1,
+                duration_ms: 100,
+            });
+        raw_snapshot(&store, &serde_json::to_vec(&profile).unwrap());
+        assert!(matches!(store.load(), Err(StorageError::Corrupt(_))));
+    }
+
+    #[test]
+    fn impossible_practice_context_is_rejected_before_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("profile.redb")).unwrap();
+        let impossible = Situation {
+            kind: HandKind::Pair,
+            value: 8,
+            dealer: 10,
+            can_double: false,
+            can_split: false,
+            can_surrender: false,
+            split_aces: false,
+        };
+        let mut profile = Profile::default();
+        profile.attempts.push(Attempt {
+            situation: impossible,
+            chosen: Action::Stand,
+            expected: Action::Hit,
+            at: 100,
+            mode: StudyMode::Table,
+        });
+        assert!(matches!(
+            store.save(&profile),
+            Err(StorageError::Corrupt(_))
+        ));
     }
 
     #[test]

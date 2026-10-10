@@ -1,11 +1,52 @@
+use std::time::Duration;
+
 use super::{Command, Page, TrainerApp, now, widgets as w};
 use eframe::egui::{self, RichText, Stroke, vec2};
 use twenty_one_pro::{
+    counting::TRIAL_SIZE,
     game::Phase,
     model::{ASSESSMENT_ROUNDS, HandKind},
     strategy,
     training::StudyMode,
 };
+
+fn format_duration(duration: Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes:02}:{seconds:02}.{:03}", duration.subsec_millis())
+}
+/// Format persisted completion timestamps as UTC so history is unambiguous offline.
+fn format_completed_at(timestamp: i64) -> String {
+    let days = timestamp.div_euclid(86_400);
+    let seconds = timestamp.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds / 3_600;
+    let minute = seconds / 60 % 60;
+    let second = seconds % 60;
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
+}
+
+// Howard Hinnant's proleptic Gregorian civil-date conversion, using only the
+// standard library and supporting every non-negative Unix timestamp.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted / 146_097
+    } else {
+        (shifted - 146_096) / 146_097
+    };
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_part = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_part + 2) / 5 + 1;
+    let month = month_part + if month_part < 10 { 3 } else { -9 };
+    let year = year + i64::from(month <= 2);
+    (year, month as u32, day as u32)
+}
 
 impl TrainerApp {
     pub(super) fn sidebar(&mut self, root: &mut egui::Ui) {
@@ -25,7 +66,8 @@ impl TrainerApp {
                     (Page::Table, "01", "The table"),
                     (Page::Insights, "02", "Your insights"),
                     (Page::Practice, "03", "Practice"),
-                    (Page::Rules, "04", "Rules"),
+                    (Page::Counting, "04", "Card counting"),
+                    (Page::Rules, "05", "Rules"),
                 ] {
                     let selected = self.page == page;
                     let label = format!("{number}   {title}");
@@ -46,7 +88,7 @@ impl TrainerApp {
                         self.page = page;
                     }
                 }
-                ui.add_space((ui.available_height() - 230.0).max(24.0));
+                ui.add_space((ui.available_height() - 274.0).max(24.0));
                 w::eyebrow(ui, "YOUR BASELINE");
                 ui.label(
                     RichText::new(format!("{} rounds", self.profile.rounds_played()))
@@ -454,6 +496,140 @@ impl TrainerApp {
         });
     }
 
+    pub(super) fn counting_view(&mut self, ui: &mut egui::Ui, command: &mut Option<Command>) {
+        w::heading(
+            ui,
+            "Count the shoe",
+            "Hi-Lo practice. Six decks. One card at a time.",
+        );
+        if self.counting.is_none() {
+            w::panel().show(ui, |ui| {
+                w::eyebrow(ui, "READY WHEN YOU ARE");
+                ui.label(RichText::new("52 cards. No hints.").size(24.0).strong());
+                ui.label("A fresh six-deck shoe is shuffled for every trial. Cards are dealt without replacement, so identical rank and suit cards can appear.");
+                ui.add_space(8.0);
+                if w::primary(ui, "Start trial").clicked() {
+                    *command = Some(Command::StartCounting);
+                }
+            });
+        } else {
+            let (card, seen, complete) = self
+                .counting
+                .as_ref()
+                .map(|trial| {
+                    (
+                        trial.current_card(),
+                        trial.cards_seen(),
+                        trial.is_complete(),
+                    )
+                })
+                .unwrap_or((None, 0, false));
+            let elapsed = self.counting_duration();
+            ui.horizontal(|ui| {
+                w::eyebrow(ui, &format!("{seen} / {TRIAL_SIZE} CARDS"));
+                ui.label(RichText::new(format_duration(elapsed)).strong());
+            });
+            ui.add_space(10.0);
+            w::panel().show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    if let Some(card) = card {
+                        w::counting_card(ui, card);
+                    }
+                });
+            });
+            ui.add_space(12.0);
+            if self.counting_assessment.is_none() && self.counting_elapsed.is_none() {
+                if complete {
+                    if w::primary(ui, "Finish  [Space]").clicked() {
+                        *command = Some(Command::FinishCounting);
+                    }
+                    w::muted(ui, "The final card stays visible until you finish.");
+                } else if w::primary(ui, "Next  [Space]").clicked() {
+                    *command = Some(Command::NextCounting);
+                }
+            } else if let Some(assessment) = &self.counting_assessment {
+                let color = if assessment.correct() {
+                    w::GREEN
+                } else {
+                    w::RED
+                };
+                w::panel().stroke(Stroke::new(1.0, color)).show(ui, |ui| {
+                    ui.label(
+                        RichText::new(if assessment.correct() {
+                            "Correct"
+                        } else {
+                            "Incorrect"
+                        })
+                        .size(24.0)
+                        .strong()
+                        .color(color),
+                    );
+                    ui.label(format!("Submitted count: {:+}", assessment.submitted));
+                    ui.label(format!("Actual count: {:+}", assessment.actual));
+                    if assessment.correct() {
+                        w::muted(
+                            ui,
+                            if self.dirty {
+                                "Correct trial is pending save. Retry saving before closing."
+                            } else {
+                                "This completed trial was saved."
+                            },
+                        );
+                    } else {
+                        w::muted(ui, "Incorrect trials are not saved.");
+                    }
+                    if w::primary(ui, "Start new trial").clicked() {
+                        *command = Some(Command::StartCounting);
+                    }
+                });
+            } else {
+                w::panel().show(ui, |ui| {
+                    w::eyebrow(ui, "FINAL COUNT");
+                    ui.label("Enter the running count after the last card.");
+                    let response = ui.text_edit_singleline(&mut self.counting_input);
+                    if response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    {
+                        *command = Some(Command::SubmitCounting);
+                    }
+                    if let Some(error) = &self.counting_input_error {
+                        ui.colored_label(w::RED, error);
+                    }
+                    if w::primary(ui, "Submit count").clicked() {
+                        *command = Some(Command::SubmitCounting);
+                    }
+                });
+            }
+        }
+        ui.add_space(18.0);
+        w::panel().show(ui, |ui| {
+            ui.label(RichText::new("Saved trials").size(20.0).strong());
+            let history = &self.counting_history;
+            if history.is_empty() {
+                w::muted(
+                    ui,
+                    "Correct trials will appear here, shortest duration first.",
+                );
+            } else {
+                egui::Grid::new("counting-history")
+                    .num_columns(3)
+                    .spacing(vec2(24.0, 8.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Duration").color(w::MUTED));
+                        ui.label(RichText::new("Completed").color(w::MUTED));
+                        ui.label(RichText::new("Result").color(w::MUTED));
+                        ui.end_row();
+                        for record in history {
+                            ui.label(format_duration(Duration::from_millis(record.duration_ms)));
+                            ui.label(format_completed_at(record.completed_at));
+                            ui.colored_label(w::GREEN, "Correct");
+                            ui.end_row();
+                        }
+                    });
+            }
+        });
+    }
+
     pub(super) fn rules_view(&self, ui: &mut egui::Ui) {
         w::heading(
             ui,
@@ -505,5 +681,19 @@ impl TrainerApp {
             if ui.button("Copy data path").clicked() { ui.ctx().copy_text(self.data_path.display().to_string()); }
             w::muted(ui, "Decisions, completed rounds, and review schedules are saved after every move. An unfinished hand is not resumed after closing. Close the app before copying the database as a backup. No telemetry or network service is used; source links open only when clicked.");
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timestamps_are_displayed_as_utc_dates() {
+        assert_eq!(format_completed_at(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(
+            format_completed_at(1_735_689_600),
+            "2025-01-01 00:00:00 UTC"
+        );
     }
 }

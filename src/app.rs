@@ -7,9 +7,10 @@ use eframe::egui;
 use std::{
     collections::VecDeque,
     path::PathBuf,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use twenty_one_pro::{
+    counting::{CountingRecord, CountingTrial, parse_submitted_count, sorted_history},
     game::{Game, Phase},
     model::{Action, HandKind, Situation},
     storage::{self, Store},
@@ -22,6 +23,7 @@ enum Page {
     Table,
     Insights,
     Practice,
+    Counting,
     Rules,
 }
 
@@ -37,11 +39,26 @@ impl Feedback {
     }
 }
 
+struct CountingAssessment {
+    submitted: i32,
+    actual: i32,
+}
+
+impl CountingAssessment {
+    fn correct(&self) -> bool {
+        self.submitted == self.actual
+    }
+}
+
 enum Command {
     Deal,
     Act(Action),
     StartPractice(Vec<Situation>),
     NextPractice,
+    StartCounting,
+    NextCounting,
+    FinishCounting,
+    SubmitCounting,
     RetrySave,
 }
 
@@ -64,6 +81,14 @@ pub struct TrainerApp {
     practice_completed: usize,
     practice_start_attempt: usize,
     practice_target: Option<Situation>,
+    counting: Option<CountingTrial>,
+    counting_started_at: Option<Instant>,
+    counting_elapsed: Option<Duration>,
+    counting_input: String,
+    counting_input_error: Option<String>,
+    counting_assessment: Option<CountingAssessment>,
+    // Sorted committed history; pending writes stay out until retry succeeds.
+    counting_history: Vec<CountingRecord>,
     filter: Option<StudyMode>,
     analytics: Analytics,
     table_stats: CellStats,
@@ -106,6 +131,7 @@ impl TrainerApp {
         };
         let analytics = profile.analytics(Some(StudyMode::Table));
         let table_stats = analytics.total;
+        let counting_history = sorted_history(&profile.counting_history);
         Self {
             page: Page::Table,
             profile,
@@ -125,6 +151,13 @@ impl TrainerApp {
             practice_completed: 0,
             practice_start_attempt: 0,
             practice_target: None,
+            counting: None,
+            counting_started_at: None,
+            counting_elapsed: None,
+            counting_input: String::new(),
+            counting_input_error: None,
+            counting_assessment: None,
+            counting_history,
             filter: Some(StudyMode::Table),
             analytics,
             table_stats,
@@ -132,6 +165,43 @@ impl TrainerApp {
             selected_cell: None,
             just_unlocked: false,
         }
+    }
+
+    fn counting_duration(&self) -> Duration {
+        self.counting_elapsed
+            .or_else(|| self.counting_started_at.map(|started| started.elapsed()))
+            .unwrap_or_default()
+    }
+
+    fn cache_counting_history(&mut self) {
+        while self.counting_history.len() < self.profile.counting_history.len() {
+            let record = self.profile.counting_history[self.counting_history.len()];
+            let key = (record.duration_ms, record.completed_at);
+            let position = self
+                .counting_history
+                .binary_search_by_key(&key, |cached| (cached.duration_ms, cached.completed_at))
+                .unwrap_or_else(|position| position);
+            self.counting_history.insert(position, record);
+        }
+    }
+
+    fn reset_counting_trial(&mut self) {
+        self.reset_counting_trial_with_seed(rand::random());
+    }
+
+    fn reset_counting_trial_with_seed(&mut self, seed: u64) {
+        let mut trial = CountingTrial::new(seed);
+        if let Err(error) = trial.start() {
+            self.error = Some(format!("Cannot start card-counting trial: {error}"));
+            return;
+        }
+        self.counting = Some(trial);
+        self.counting_started_at = Some(Instant::now());
+        self.counting_elapsed = None;
+        self.counting_input.clear();
+        self.counting_input_error = None;
+        self.counting_assessment = None;
+        self.error = None;
     }
 
     fn refresh_analytics(&mut self) {
@@ -143,18 +213,22 @@ impl TrainerApp {
         };
     }
 
-    fn persist_progress(&mut self) {
+    fn persist_progress(&mut self) -> bool {
         self.dirty = true;
         let Some(store) = &self.store else {
-            return;
+            return false;
         };
         match store.save(&self.profile) {
             Ok(()) => {
                 self.dirty = false;
                 self.error = None;
                 self.close_warning = false;
+                true
             }
-            Err(error) => self.error = Some(format!("Progress could not be saved: {error}")),
+            Err(error) => {
+                self.error = Some(format!("Progress could not be saved: {error}"));
+                false
+            }
         }
     }
 
@@ -198,7 +272,9 @@ impl TrainerApp {
 
     fn execute(&mut self, command: Command) {
         if matches!(command, Command::RetrySave) {
-            self.persist_progress();
+            if self.persist_progress() {
+                self.cache_counting_history();
+            }
             return;
         }
         if self.dirty || self.startup_error.is_some() {
@@ -275,6 +351,55 @@ impl TrainerApp {
                 self.start_next_practice();
             }
             Command::NextPractice => self.start_next_practice(),
+            Command::StartCounting => self.reset_counting_trial(),
+            Command::NextCounting => {
+                if let Some(trial) = self.counting.as_mut()
+                    && !trial.is_complete()
+                    && let Err(error) = trial.next_card()
+                {
+                    self.error = Some(format!("Cannot reveal the next card: {error}"));
+                }
+            }
+            Command::FinishCounting => {
+                if self
+                    .counting
+                    .as_ref()
+                    .is_some_and(CountingTrial::is_complete)
+                {
+                    self.counting_elapsed = self
+                        .counting_started_at
+                        .take()
+                        .map(|started| started.elapsed());
+                    self.counting_input_error = None;
+                }
+            }
+            Command::SubmitCounting => {
+                if self.counting_assessment.is_some() {
+                    return;
+                }
+                let Some(submitted) = parse_submitted_count(&self.counting_input) else {
+                    self.counting_input_error =
+                        Some("Enter a signed whole number, such as +3 or -2.".to_owned());
+                    return;
+                };
+                let Some(trial) = self.counting.as_ref() else {
+                    return;
+                };
+                let Some(elapsed) = self.counting_elapsed else {
+                    return;
+                };
+                let actual = trial.actual_count();
+                let correct = submitted == actual;
+                self.counting_input_error = None;
+                self.counting_assessment = Some(CountingAssessment { submitted, actual });
+                if correct {
+                    self.profile
+                        .record_counting_trial(now(), elapsed.as_millis() as u64);
+                    if self.persist_progress() {
+                        self.cache_counting_history();
+                    }
+                }
+            }
             Command::RetrySave => unreachable!(),
         }
     }
@@ -283,15 +408,29 @@ impl TrainerApp {
         if self.dirty || ctx.egui_wants_keyboard_input() {
             return None;
         }
-        let game = match self.page {
-            Page::Table => &self.table,
-            Page::Practice => self.practice.as_ref()?,
-            _ => return None,
-        };
         ctx.input(|input| {
             if input.modifiers.any() {
                 return None;
             }
+            if self.page == Page::Counting {
+                let trial = self.counting.as_ref()?;
+                if input.key_pressed(egui::Key::Space)
+                    && self.counting_elapsed.is_none()
+                    && self.counting_assessment.is_none()
+                {
+                    return Some(if trial.is_complete() {
+                        Command::FinishCounting
+                    } else {
+                        Command::NextCounting
+                    });
+                }
+                return None;
+            }
+            let game = match self.page {
+                Page::Table => &self.table,
+                Page::Practice => self.practice.as_ref()?,
+                _ => return None,
+            };
             if input.key_pressed(egui::Key::Enter) {
                 return match (self.page, game.phase) {
                     (Page::Table, Phase::Ready | Phase::Finished) => Some(Command::Deal),
@@ -319,7 +458,13 @@ impl TrainerApp {
 impl eframe::App for TrainerApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
-        ctx.request_repaint_after(Duration::from_secs(30));
+        ctx.request_repaint_after(
+            if self.page == Page::Counting && self.counting_started_at.is_some() {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(30)
+            },
+        );
         if self.dirty && !self.allow_close && ctx.input(|input| input.viewport().close_requested())
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -378,6 +523,7 @@ impl eframe::App for TrainerApp {
                         Page::Table => self.table_view(ui, &mut command),
                         Page::Insights => self.insights_view(ui, &mut command),
                         Page::Practice => self.practice_view(ui, &mut command),
+                        Page::Counting => self.counting_view(ui, &mut command),
                         Page::Rules => self.rules_view(ui),
                     }
                 });
@@ -387,5 +533,188 @@ impl eframe::App for TrainerApp {
             self.execute(command);
             ctx.request_repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use twenty_one_pro::counting::TRIAL_SIZE;
+
+    fn test_app(store: Store) -> TrainerApp {
+        let profile = Profile::default();
+        let analytics = profile.analytics(Some(StudyMode::Table));
+        TrainerApp {
+            page: Page::Counting,
+            profile,
+            store: Some(store),
+            data_path: PathBuf::new(),
+            startup_error: None,
+            error: None,
+            dirty: false,
+            allow_close: false,
+            close_warning: false,
+            table: Game::new(1),
+            table_feedback: Vec::new(),
+            practice: None,
+            practice_feedback: Vec::new(),
+            practice_queue: VecDeque::new(),
+            practice_total: 0,
+            practice_completed: 0,
+            practice_start_attempt: 0,
+            practice_target: None,
+            counting: None,
+            counting_started_at: None,
+            counting_elapsed: None,
+            counting_input: String::new(),
+            counting_input_error: None,
+            counting_assessment: None,
+            counting_history: Vec::new(),
+            filter: Some(StudyMode::Table),
+            table_stats: analytics.total,
+            analytics,
+            heatmap: HandKind::Hard,
+            selected_cell: None,
+            just_unlocked: false,
+        }
+    }
+
+    fn finish_counting_trial(app: &mut TrainerApp, seed: u64) -> i32 {
+        app.reset_counting_trial_with_seed(seed);
+        for _ in 1..TRIAL_SIZE {
+            app.execute(Command::NextCounting);
+        }
+        assert_eq!(app.counting.as_ref().unwrap().cards_seen(), TRIAL_SIZE);
+        app.execute(Command::FinishCounting);
+        assert!(app.counting_started_at.is_none());
+        assert!(app.counting_elapsed.is_some());
+        app.counting.as_ref().unwrap().actual_count()
+    }
+
+    #[test]
+    fn counting_controller_assesses_once_and_saves_only_correct_trials() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("profile.redb");
+        let store = Store::open(&path).unwrap();
+        let mut app = test_app(store);
+
+        let actual = finish_counting_trial(&mut app, 42);
+        let elapsed = app.counting_elapsed.unwrap();
+        assert_eq!(app.counting_duration(), elapsed);
+
+        app.counting_input = "not a count".to_owned();
+        app.execute(Command::SubmitCounting);
+        assert!(app.counting_assessment.is_none());
+        assert!(app.counting_input_error.is_some());
+        assert!(app.profile.counting_history.is_empty());
+
+        app.counting_input = (actual + 1).to_string();
+        app.execute(Command::SubmitCounting);
+        assert!(
+            !app.counting_assessment.as_ref().unwrap().correct(),
+            "the deliberately wrong answer must be assessed as incorrect"
+        );
+        assert!(app.profile.counting_history.is_empty());
+
+        app.counting_input = actual.to_string();
+        app.execute(Command::SubmitCounting);
+        assert!(app.profile.counting_history.is_empty());
+
+        let actual = finish_counting_trial(&mut app, 7);
+        let elapsed = app.counting_elapsed.unwrap();
+        app.counting_input = actual.to_string();
+        app.execute(Command::SubmitCounting);
+        assert!(app.counting_assessment.as_ref().unwrap().correct());
+        assert_eq!(app.profile.counting_history.len(), 1);
+        assert_eq!(
+            app.profile.counting_history[0].duration_ms,
+            elapsed.as_millis() as u64
+        );
+
+        app.execute(Command::SubmitCounting);
+        assert_eq!(app.profile.counting_history.len(), 1);
+
+        drop(app);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.load().unwrap().counting_history.len(), 1);
+    }
+    #[test]
+    fn failed_counting_save_stays_pending_until_retry() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("profile.redb");
+        let store = Store::open(&path).unwrap();
+        let mut app = test_app(store);
+        let actual = finish_counting_trial(&mut app, 42);
+        app.profile.schema_version += 1;
+        app.counting_input = actual.to_string();
+        app.execute(Command::SubmitCounting);
+
+        assert!(app.dirty);
+        assert!(app.counting_assessment.as_ref().unwrap().correct());
+        assert_eq!(app.profile.counting_history.len(), 1);
+        assert!(app.counting_history.is_empty());
+
+        app.profile.schema_version -= 1;
+        app.execute(Command::RetrySave);
+        assert!(!app.dirty);
+        assert_eq!(app.counting_history.len(), 1);
+        drop(app);
+        assert_eq!(
+            Store::open(&path)
+                .unwrap()
+                .load()
+                .unwrap()
+                .counting_history
+                .len(),
+            1
+        );
+    }
+
+    fn spacebar_context() -> egui::Context {
+        let context = egui::Context::default();
+        let mut output = context.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Space,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |_| {},
+        );
+        output.textures_delta.clear();
+        context
+    }
+
+    #[test]
+    fn spacebar_dispatches_next_and_finish_for_counting_trial() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("profile.redb");
+        let store = Store::open(&path).unwrap();
+        let mut app = test_app(store);
+        app.reset_counting_trial_with_seed(42);
+
+        let context = spacebar_context();
+        assert!(matches!(
+            app.shortcut(&context),
+            Some(Command::NextCounting)
+        ));
+        app.execute(Command::NextCounting);
+        for _ in 2..TRIAL_SIZE {
+            app.execute(Command::NextCounting);
+        }
+        assert_eq!(app.counting.as_ref().unwrap().cards_seen(), TRIAL_SIZE);
+
+        let context = spacebar_context();
+        assert!(matches!(
+            app.shortcut(&context),
+            Some(Command::FinishCounting)
+        ));
+        app.execute(Command::FinishCounting);
+        assert!(app.counting_elapsed.is_some());
     }
 }
