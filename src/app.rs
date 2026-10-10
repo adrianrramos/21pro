@@ -69,6 +69,15 @@ enum Command {
     SubmitCounting,
     RetrySave,
 }
+const ACTION_SHORTCUTS: [(egui::Key, Action); 7] = [
+    (egui::Key::H, Action::Hit),
+    (egui::Key::S, Action::Stand),
+    (egui::Key::D, Action::Double),
+    (egui::Key::P, Action::Split),
+    (egui::Key::R, Action::Surrender),
+    (egui::Key::I, Action::Insure),
+    (egui::Key::N, Action::DeclineInsurance),
+];
 
 pub struct TrainerApp {
     page: Page,
@@ -483,24 +492,16 @@ impl TrainerApp {
                 }
                 if input.key_pressed(egui::Key::Enter)
                     && matches!(self.play.phase(), Phase::Ready | Phase::Finished)
-                    && self.play.pending_wager_cents >= play::MINIMUM_WAGER_CENTS
-                    && self.play.pending_wager_cents <= self.play.available_cents
+                    && self.play.pending_wager_cents() >= play::MINIMUM_WAGER_CENTS
+                    && self.play.pending_wager_cents() <= self.play.available_cents()
                 {
                     return Some(Command::PlayDeal);
                 }
-                let situation = self.play.game.situation()?;
-                [
-                    (egui::Key::H, Action::Hit),
-                    (egui::Key::S, Action::Stand),
-                    (egui::Key::D, Action::Double),
-                    (egui::Key::P, Action::Split),
-                    (egui::Key::R, Action::Surrender),
-                    (egui::Key::I, Action::Insure),
-                    (egui::Key::N, Action::DeclineInsurance),
-                ]
-                .into_iter()
-                .find(|(key, action)| input.key_pressed(*key) && situation.allows(*action))
-                .map(|(_, action)| Command::PlayAct(action))
+                let situation = self.play.game().situation()?;
+                ACTION_SHORTCUTS
+                    .into_iter()
+                    .find(|(key, action)| input.key_pressed(*key) && situation.allows(*action))
+                    .map(|(_, action)| Command::PlayAct(action))
             });
         }
         ctx.input(|input| {
@@ -534,18 +535,10 @@ impl TrainerApp {
                 };
             }
             let situation = game.situation()?;
-            [
-                (egui::Key::H, Action::Hit),
-                (egui::Key::S, Action::Stand),
-                (egui::Key::D, Action::Double),
-                (egui::Key::P, Action::Split),
-                (egui::Key::R, Action::Surrender),
-                (egui::Key::I, Action::Insure),
-                (egui::Key::N, Action::DeclineInsurance),
-            ]
-            .into_iter()
-            .find(|(key, action)| input.key_pressed(*key) && situation.allows(*action))
-            .map(|(_, action)| Command::Act(action))
+            ACTION_SHORTCUTS
+                .into_iter()
+                .find(|(key, action)| input.key_pressed(*key) && situation.allows(*action))
+                .map(|(_, action)| Command::Act(action))
         })
     }
 }

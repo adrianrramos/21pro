@@ -78,6 +78,11 @@ pub enum GameError {
     InvalidSnapshot(String),
 }
 
+/// Serializable game state for durable Free Play resume.
+///
+/// The shoe contains only undealt cards; cards from earlier completed rounds
+/// are intentionally no longer represented. `from_snapshot` validates the
+/// physical-card, phase, wager, and hidden-card invariants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameSnapshot {
     pub dealer: Vec<Card>,
@@ -127,6 +132,7 @@ impl Game {
         game
     }
 
+    /// Copies the current game state without the non-serialized RNG.
     pub fn snapshot(&self) -> GameSnapshot {
         GameSnapshot {
             dealer: self.dealer.clone(),
@@ -140,6 +146,7 @@ impl Game {
         }
     }
 
+    /// Restores and validates a persisted game state.
     pub fn from_snapshot(snapshot: GameSnapshot) -> Result<Self, GameError> {
         validate_snapshot(&snapshot)?;
         Ok(Self {
@@ -152,6 +159,18 @@ impl Game {
             rng: SmallRng::seed_from_u64(rand::random()),
             insured: snapshot.insured,
             splits_used: snapshot.splits_used,
+        })
+    }
+    pub(crate) fn validate(&self) -> Result<(), GameError> {
+        validate_game_state(GameState {
+            dealer: &self.dealer,
+            hands: &self.hands,
+            active: self.active,
+            phase: self.phase,
+            result: self.result.as_ref(),
+            shoe: &self.shoe,
+            insured: self.insured,
+            splits_used: self.splits_used,
         })
     }
 
@@ -175,10 +194,12 @@ impl Game {
             .expect("six-deck cut-card reserve exhausted")
     }
 
+    /// Returns the number of undealt cards in the current shoe.
     pub fn remaining_cards(&self) -> usize {
         self.shoe.len()
     }
 
+    /// Returns whether the independent insurance stake is reserved.
     pub fn insured(&self) -> bool {
         self.insured
     }
@@ -534,12 +555,45 @@ fn practice_values(target: Situation) -> Option<([u8; 3], usize)> {
     None
 }
 
+struct GameState<'a> {
+    dealer: &'a [Card],
+    hands: &'a [PlayerHand],
+    active: usize,
+    phase: Phase,
+    result: Option<&'a RoundResult>,
+    shoe: &'a [Card],
+    insured: bool,
+    splits_used: usize,
+}
+
 fn validate_snapshot(snapshot: &GameSnapshot) -> Result<(), GameError> {
-    if snapshot.shoe.len() > 312
-        || snapshot.hands.len() > 4
-        || snapshot.splits_used > 3
-        || snapshot
-            .hands
+    validate_game_state(GameState {
+        dealer: &snapshot.dealer,
+        hands: &snapshot.hands,
+        active: snapshot.active,
+        phase: snapshot.phase,
+        result: snapshot.result.as_ref(),
+        shoe: &snapshot.shoe,
+        insured: snapshot.insured,
+        splits_used: snapshot.splits_used,
+    })
+}
+
+fn validate_game_state(state: GameState<'_>) -> Result<(), GameError> {
+    let GameState {
+        dealer,
+        hands,
+        active,
+        phase,
+        result,
+        shoe,
+        insured,
+        splits_used,
+    } = state;
+    if shoe.len() > 312
+        || hands.len() > 4
+        || splits_used > 3
+        || hands
             .iter()
             .any(|hand| hand.cards.is_empty() || !matches!(hand.wager_half_units, 2 | 4))
     {
@@ -548,11 +602,10 @@ fn validate_snapshot(snapshot: &GameSnapshot) -> Result<(), GameError> {
         ));
     }
     let mut cards: Vec<(Card, usize)> = Vec::with_capacity(52);
-    for card in snapshot
-        .shoe
+    for card in shoe
         .iter()
-        .chain(snapshot.dealer.iter())
-        .chain(snapshot.hands.iter().flat_map(|hand| hand.cards.iter()))
+        .chain(dealer.iter())
+        .chain(hands.iter().flat_map(|hand| hand.cards.iter()))
     {
         if let Some((_, count)) = cards.iter_mut().find(|(known, _)| known == card) {
             *count += 1;
@@ -565,17 +618,17 @@ fn validate_snapshot(snapshot: &GameSnapshot) -> Result<(), GameError> {
             cards.push((*card, 1));
         }
     }
-    if cards.iter().map(|(_, count)| count).sum::<usize>() != 312 {
+    if cards.iter().map(|(_, count)| count).sum::<usize>() > 312 {
         return Err(GameError::InvalidSnapshot(
-            "saved cards do not partition a six-deck shoe".to_owned(),
+            "saved cards exceed a six-deck shoe".to_owned(),
         ));
     }
-    if snapshot.dealer.len() == 1 {
+    if dealer.len() == 1 {
         return Err(GameError::InvalidSnapshot(
             "dealer must have zero or at least two cards".to_owned(),
         ));
     }
-    if snapshot.result.as_ref().is_some_and(|result| {
+    if result.is_some_and(|result| {
         result.net_half_units
             != result
                 .outcomes
@@ -587,14 +640,14 @@ fn validate_snapshot(snapshot: &GameSnapshot) -> Result<(), GameError> {
             "round result total does not match its outcomes".to_owned(),
         ));
     }
-    match snapshot.phase {
+    match phase {
         Phase::Ready => {
-            if !snapshot.dealer.is_empty()
-                || !snapshot.hands.is_empty()
-                || snapshot.result.is_some()
-                || snapshot.active != 0
-                || snapshot.insured
-                || snapshot.splits_used != 0
+            if !dealer.is_empty()
+                || !hands.is_empty()
+                || result.is_some()
+                || active != 0
+                || insured
+                || splits_used != 0
             {
                 return Err(GameError::InvalidSnapshot(
                     "ready game contains round state".to_owned(),
@@ -602,11 +655,13 @@ fn validate_snapshot(snapshot: &GameSnapshot) -> Result<(), GameError> {
             }
         }
         Phase::Insurance | Phase::Playing => {
-            if snapshot.dealer.len() != 2
-                || snapshot.hands.is_empty()
-                || snapshot.active >= snapshot.hands.len()
-                || snapshot.result.is_some()
-                || (snapshot.phase == Phase::Insurance && snapshot.insured)
+            if dealer.len() != 2
+                || hands.is_empty()
+                || active >= hands.len()
+                || result.is_some()
+                || shoe.is_empty()
+                || hands[active].status != HandStatus::Playing
+                || (phase == Phase::Insurance && insured)
             {
                 return Err(GameError::InvalidSnapshot(
                     "active game is missing round state".to_owned(),
@@ -614,14 +669,14 @@ fn validate_snapshot(snapshot: &GameSnapshot) -> Result<(), GameError> {
             }
         }
         Phase::Finished => {
-            if snapshot.dealer.len() < 2
-                || snapshot.hands.is_empty()
-                || snapshot.active != snapshot.hands.len()
-                || snapshot.result.is_none()
-                || snapshot
-                    .hands
-                    .iter()
-                    .any(|hand| hand.status != HandStatus::Settled)
+            if dealer.len() < 2
+                || hands.is_empty()
+                || active != hands.len()
+                || result.is_none()
+                || hands.iter().any(|hand| hand.status != HandStatus::Settled)
+                || result.is_some_and(|result| {
+                    result.outcomes.len() != hands.len() + usize::from(insured)
+                })
             {
                 return Err(GameError::InvalidSnapshot(
                     "finished game is missing settlement state".to_owned(),
@@ -1007,5 +1062,26 @@ mod tests {
         assert!(naturals > 0 && naturals < 100);
         assert!(suits.iter().any(|suit| *suit != suits[0]));
         assert!(ten_ranks.iter().any(|rank| *rank != ten_ranks[0]));
+    }
+    #[test]
+    fn rejects_active_snapshot_with_no_undealt_cards() {
+        let mut snapshot = Game::new(22).snapshot();
+        let cards = std::mem::take(&mut snapshot.shoe);
+        snapshot.dealer = cards[..2].to_vec();
+        snapshot.hands = vec![PlayerHand {
+            cards: cards[2..].to_vec(),
+            wager_half_units: BASE_BET,
+            status: HandStatus::Playing,
+            from_split: false,
+            split_aces: false,
+        }];
+        snapshot.active = 0;
+        snapshot.phase = Phase::Playing;
+        snapshot.result = None;
+        snapshot.insured = false;
+        assert!(matches!(
+            Game::from_snapshot(snapshot),
+            Err(GameError::InvalidSnapshot(_))
+        ));
     }
 }
