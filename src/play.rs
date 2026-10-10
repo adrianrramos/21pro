@@ -305,9 +305,10 @@ impl PlaySession {
             }
             Phase::Finished => {
                 if !self.round_settled
-                    || self.locked_wager_cents.is_none()
                     || self.committed_cents != 0
                     || self.history.last().unwrap().bankroll_cents != self.available_cents
+                    || (self.pending_wager_cents == 0 && self.locked_wager_cents.is_none())
+                    || (self.pending_wager_cents > 0 && self.locked_wager_cents.is_some())
                 {
                     return Err(PlayError::InvalidSnapshot(
                         "settled funds are inconsistent".to_owned(),
@@ -554,5 +555,14 @@ mod tests {
         assert_eq!(restored.history.len(), 2);
         assert_eq!(restored.available_cents, 100_750);
         assert_eq!(restored.committed_cents, 0);
+    }
+    #[test]
+    fn finished_round_can_build_and_validate_the_next_wager() {
+        let mut session = prepared_session(&[11, 10], &[10, 6]);
+        session.act(Action::Stand).unwrap();
+        session.add_chip(500).unwrap();
+        session.validate().unwrap();
+        assert_eq!(session.locked_wager_cents, None);
+        assert_eq!(session.pending_wager_cents, 500);
     }
 }
