@@ -387,15 +387,26 @@ impl TrainerApp {
         if self.dirty || ctx.egui_wants_keyboard_input() {
             return None;
         }
-        let game = match self.page {
-            Page::Table => &self.table,
-            Page::Practice => self.practice.as_ref()?,
-            _ => return None,
-        };
         ctx.input(|input| {
             if input.modifiers.any() {
                 return None;
             }
+            if self.page == Page::Counting {
+                let can_advance = self
+                    .counting
+                    .as_ref()
+                    .is_some_and(|trial| !trial.is_complete());
+                return (can_advance
+                    && self.counting_elapsed.is_none()
+                    && self.counting_assessment.is_none()
+                    && input.key_pressed(egui::Key::Space))
+                .then_some(Command::NextCounting);
+            }
+            let game = match self.page {
+                Page::Table => &self.table,
+                Page::Practice => self.practice.as_ref()?,
+                _ => return None,
+            };
             if input.key_pressed(egui::Key::Enter) {
                 return match (self.page, game.phase) {
                     (Page::Table, Phase::Ready | Phase::Finished) => Some(Command::Deal),
@@ -603,5 +614,34 @@ mod tests {
         drop(app);
         let reopened = Store::open(&path).unwrap();
         assert_eq!(reopened.load().unwrap().counting_history.len(), 1);
+    }
+    #[test]
+    fn spacebar_dispatches_next_for_an_active_counting_trial() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("profile.redb");
+        let store = Store::open(&path).unwrap();
+        let mut app = test_app(store);
+        app.reset_counting_trial_with_seed(42);
+        let context = egui::Context::default();
+        let mut output = context.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Space,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |_| {},
+        );
+        output.textures_delta.clear();
+        assert!(matches!(
+            app.shortcut(&context),
+            Some(Command::NextCounting)
+        ));
+        app.execute(Command::NextCounting);
+        assert_eq!(app.counting.as_ref().unwrap().cards_seen(), 2);
     }
 }

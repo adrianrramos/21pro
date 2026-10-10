@@ -513,7 +513,7 @@ impl TrainerApp {
                         *command = Some(Command::FinishCounting);
                     }
                     w::muted(ui, "The final card stays visible until you finish.");
-                } else if w::primary(ui, "Next").clicked() {
+                } else if w::primary(ui, "Next  [Space]").clicked() {
                     *command = Some(Command::NextCounting);
                 }
             } else if let Some(assessment) = &self.counting_assessment {

@@ -52,6 +52,7 @@ The same native app also runs on Linux with an X11 display, a C linker, and Open
 | Key | Action |
 | --- | --- |
 | Enter | Deal / next hand / finish a practice session |
+| Space | Next card during a card-counting trial |
 | H | Hit |
 | S | Stand |
 | D | Double |
