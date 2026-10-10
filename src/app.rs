@@ -10,6 +10,7 @@ mod workflow_tests;
 use eframe::egui;
 use std::{
     collections::VecDeque,
+    ffi::OsString,
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -79,6 +80,12 @@ pub struct TrainerApp {
     fixture: Option<fixtures::Session>,
 }
 
+fn configured_data_path(directory: Option<OsString>) -> Option<PathBuf> {
+    directory
+        .filter(|directory| !directory.is_empty())
+        .map(|directory| PathBuf::from(directory).join("profile.redb"))
+}
+
 impl TrainerApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -94,9 +101,10 @@ impl TrainerApp {
         let mut startup_error = None;
         let mut store = None;
         let mut profile = Profile::default();
-        let path = std::env::var_os("TWENTY_ONE_PRO_DATA_DIR")
-            .map(|directory| Ok(PathBuf::from(directory).join("profile.redb")))
-            .unwrap_or_else(storage::default_path);
+        let path = match configured_data_path(std::env::var_os("TWENTY_ONE_PRO_DATA_DIR")) {
+            Some(path) => Ok(path),
+            None => storage::default_path(),
+        };
         let data_path = match path {
             Ok(path) => {
                 match Store::open(&path).and_then(|db| db.load().map(|saved| (db, saved))) {
@@ -456,5 +464,166 @@ impl eframe::App for TrainerApp {
             self.execute(command);
             ctx.request_repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::App;
+    use tempfile::TempDir;
+    use twenty_one_pro::{
+        model::{Action, HandKind, Situation},
+        training::SCHEMA_VERSION,
+    };
+
+    fn app_with_store() -> (TempDir, TrainerApp) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("profile.redb")).unwrap();
+        let profile = Profile::default();
+        let analytics = profile.analytics(Some(StudyMode::Table));
+        let app = TrainerApp {
+            page: Page::Table,
+            profile,
+            store: Some(store),
+            data_path: directory.path().join("profile.redb"),
+            startup_error: None,
+            error: None,
+            dirty: false,
+            allow_close: false,
+            close_warning: false,
+            table: Game::new(0),
+            table_feedback: Vec::new(),
+            practice: None,
+            practice_feedback: Vec::new(),
+            practice_queue: VecDeque::new(),
+            practice_total: 0,
+            practice_completed: 0,
+            practice_start_attempt: 0,
+            practice_target: None,
+            filter: Some(StudyMode::Table),
+            table_stats: analytics.total,
+            analytics,
+            heatmap: HandKind::Hard,
+            selected_cell: None,
+            just_unlocked: false,
+            fixture: None,
+        };
+        (directory, app)
+    }
+
+    fn finish_table_with_strategy(app: &mut TrainerApp) {
+        while app.table.phase != Phase::Finished {
+            let situation = app.table.situation().unwrap();
+            app.execute(Command::Act(strategy::recommendation(situation).action));
+        }
+    }
+
+    #[test]
+    fn empty_data_directory_override_is_ignored() {
+        assert_eq!(configured_data_path(Some(OsString::new())), None);
+        assert_eq!(
+            configured_data_path(Some(OsString::from("/tmp/21pro"))),
+            Some(PathBuf::from("/tmp/21pro/profile.redb"))
+        );
+    }
+
+    #[test]
+    fn natural_deal_records_and_persists_one_original_round() {
+        let (_directory, mut app) = app_with_store();
+        for seed in 0..1000 {
+            app.table = Game::new(seed);
+            app.execute(Command::Deal);
+            if app.table.result.is_some() {
+                break;
+            }
+        }
+        assert!(app.table.result.is_some());
+        assert_eq!(app.profile.rounds_played(), 1);
+        assert_eq!(
+            app.store.as_ref().unwrap().load().unwrap().rounds_played(),
+            1
+        );
+    }
+
+    #[test]
+    fn split_settlement_records_and_persists_one_original_round() {
+        let (_directory, mut app) = app_with_store();
+        let target = Situation {
+            kind: HandKind::Pair,
+            value: 8,
+            dealer: 6,
+            can_double: true,
+            can_split: true,
+            can_surrender: true,
+            split_aces: false,
+        };
+        app.table = Game::practice(target, 0).unwrap();
+        app.execute(Command::Act(Action::Split));
+        finish_table_with_strategy(&mut app);
+
+        assert_eq!(app.profile.rounds_played(), 1);
+        assert!(app.profile.attempts.len() >= 2);
+        assert_eq!(
+            app.store.as_ref().unwrap().load().unwrap().rounds_played(),
+            1
+        );
+    }
+
+    #[test]
+    fn failed_save_pauses_play_and_close_until_retry_or_discard() {
+        let (_directory, mut app) = app_with_store();
+        let target = Situation {
+            kind: HandKind::Hard,
+            value: 16,
+            dealer: 10,
+            can_double: true,
+            can_split: false,
+            can_surrender: true,
+            split_aces: false,
+        };
+        app.table = Game::practice(target, 0).unwrap();
+        app.profile.schema_version = SCHEMA_VERSION + 1;
+        app.execute(Command::Act(Action::Stand));
+
+        assert!(app.dirty);
+        assert!(app.error.is_some());
+        let attempts = app.profile.attempts.len();
+        app.execute(Command::Act(Action::Hit));
+        assert_eq!(app.profile.attempts.len(), attempts);
+
+        app.page = Page::Rules;
+        let context = egui::Context::default();
+        let mut viewports = egui::ViewportIdMap::default();
+        viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                events: vec![egui::ViewportEvent::Close],
+                ..Default::default()
+            },
+        );
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut output = context.run_ui(
+            egui::RawInput {
+                viewport_id: egui::ViewportId::ROOT,
+                viewports,
+                ..Default::default()
+            },
+            |ui| app.ui(ui, &mut frame),
+        );
+        output.textures_delta.clear();
+        let root = output.viewport_output.get(&egui::ViewportId::ROOT).unwrap();
+        assert!(root.commands.contains(&egui::ViewportCommand::CancelClose));
+        assert!(app.close_warning);
+        assert!(!app.allow_close);
+
+        app.profile.schema_version = SCHEMA_VERSION;
+        app.execute(Command::RetrySave);
+        assert!(!app.dirty);
+        assert!(app.error.is_none());
+        assert_eq!(
+            app.store.as_ref().unwrap().load().unwrap().rounds_played(),
+            1
+        );
     }
 }

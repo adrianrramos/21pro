@@ -112,8 +112,8 @@ impl TrainerApp {
             }
             Fixture::Rules => app.page = Page::Rules,
         }
-        if let Some(error) = &app.error {
-            return Err(error.clone().into());
+        if let Some(error) = app.error.take() {
+            return Err(error.into());
         }
         Ok(app)
     }
