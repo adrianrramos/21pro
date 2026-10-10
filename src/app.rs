@@ -4,6 +4,8 @@
 mod fixtures;
 mod views;
 mod widgets;
+#[cfg(test)]
+mod workflow_tests;
 
 use eframe::egui;
 use std::{
