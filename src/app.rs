@@ -505,6 +505,7 @@ mod tests {
             heatmap: HandKind::Hard,
             selected_cell: None,
             just_unlocked: false,
+            fixture: None,
         };
         (directory, app)
     }
