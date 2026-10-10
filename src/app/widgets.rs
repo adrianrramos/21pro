@@ -238,6 +238,19 @@ fn paint_card(ui: &egui::Ui, rect: egui::Rect, card: Option<Card>) {
         .corner_radius(6)
         .paint_at(ui, rect);
 }
+
+pub fn counting_card(ui: &mut egui::Ui, card: Card) {
+    let size = vec2(104.0, 148.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Image,
+            true,
+            format!("{:?} of {:?}", card.rank, card.suit),
+        )
+    });
+    paint_card(ui, rect, Some(card));
+}
 fn cards(ui: &mut egui::Ui, cards: &[Card], hide_hole: bool) {
     let count = cards.len().max(2);
     let card_size = vec2(52.0, 74.0);

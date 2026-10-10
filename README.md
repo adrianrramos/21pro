@@ -44,13 +44,15 @@ The same native app also runs on Linux with an X11 display, a C linker, and Open
 2. **Baseline:** complete **250 original table rounds**, accumulated across sessions. Split children are part of their original round; practice never advances this threshold. Naturals count as completed rounds, but produce no artificial decision score.
 3. **Your insights:** the assessment opens automatically at the threshold. It includes accuracy trends, mistakes by hand family, and separate hard-total, soft-total, and pair heatmaps. Table play and focused practice can be viewed separately or together.
 4. **Focused practice:** generate a 12-hand plan from due reviews and weak observed situations, or drill a specific heatmap situation. Practice uses the same engine, and hands continue after the targeted decision. If fewer than 12 distinct situations are known, the plan uses the available ones.
-5. **Repeat over time:** mistakes enter a local spaced-repetition schedule. Due correct answers earn longer intervals; errors return sooner. History and due dates survive closing the app.
+5. **Card counting:** open the Card counting tab for a 52-card Hi-Lo trial from a freshly shuffled six-deck shoe. The final running count is checked after timing stops; only correct trials are saved, with the fastest history first.
+6. **Repeat over time:** mistakes enter a local spaced-repetition schedule. Due correct answers earn longer intervals; errors return sooner. History and due dates survive closing the app.
 
 ### Controls
 
 | Key | Action |
 | --- | --- |
 | Enter | Deal / next hand / finish a practice session |
+| Space | Next card or finish the active card-counting trial |
 | H | Hit |
 | S | Stand |
 | D | Double |
@@ -119,7 +121,7 @@ On macOS, the database is:
 
 The Rules screen shows the exact path on every platform. Close the app before copying that file as a backup. A single versioned JSON profile is committed transactionally inside a `redb` database. A locked, corrupt, wrong-ruleset, or unsupported-version profile produces an explicit error; the app does not silently replace it with empty progress.
 
-Decisions, completed rounds, and schedules are saved after every action. An **unfinished hand is not resumed** after closing; already recorded decisions remain saved, but that incomplete round does not count. If a write fails, play pauses, a retry is offered, and closing warns about unsaved decisions.
+Decisions, completed rounds, review schedules, and correct card-counting trials are saved locally. An **unfinished hand or counting trial is not resumed** after closing; already recorded decisions remain saved, but incomplete work and incorrect counting answers are not saved. If a write fails, play pauses, a retry is offered, and closing warns about unsaved changes.
 
 For an isolated development profile:
 
@@ -136,6 +138,7 @@ This is one Cargo package with a library and a desktop binary. The library expos
 | Read in this order | Rust concepts to study | What to trace |
 | --- | --- | --- |
 | `src/model.rs` | Enums, `match`, `Copy`, derives, borrowed slices | How multiple aces change from 11 to 1; why a `Situation` includes legal actions |
+| `src/counting.rs` | Seeded shuffles, bounded state transitions, serde records | How a six-deck trial reveals exactly 52 cards and applies Hi-Lo values |
 | `src/strategy.rs` | Pure functions, match guards, static string references | Surrender/split/double precedence and fallback when an action is unavailable |
 | `src/game.rs` | Ownership, `&mut self`, `Result`, state transitions, seeded RNG | Follow `deal`, `situation`, and `act`; find where a chosen double draws exactly one card |
 | `src/training.rs` | Iterators, `BTreeMap`, `BTreeSet`, deterministic state updates | Follow an incorrect attempt into history, analytics, and the review queue |
@@ -144,7 +147,7 @@ This is one Cargo package with a library and a desktop binary. The library expos
 | `src/app/views.rs`, `src/app/widgets.rs` | Closures, immediate-mode UI, custom painting | How rendering reads state and emits a command without replaying game actions every frame |
 | `src/main.rs` | Native application entry point, configuration | How the window and `TrainerApp` are created |
 
-`Analytics::trend` reuses `CellStats` for nonempty blocks of up to 25 decisions; the renderer gets block numbers from their positions. Analytics and the UI use `Option<StudyMode>`: `Some(mode)` selects one mode and `None` selects both. The controller owns table/practice identity, so the game engine needs no training-mode flag. These changes leave the saved profile format unchanged.
+`Analytics::trend` reuses `CellStats` for nonempty blocks of up to 25 decisions; the renderer gets block numbers from their positions. Analytics and the UI use `Option<StudyMode>`: `Some(mode)` selects one mode and `None` selects both. The controller owns table/practice identity, while card-counting history is stored separately and never contributes to blackjack learning analytics. The saved profile remains backward-compatible because older snapshots default the new history to empty.
 
 ### A concrete decision to follow
 
@@ -177,7 +180,7 @@ cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-The regression tests cover strategy chart boundaries and legal fallbacks, multiple aces, natural/split payouts, insurance, original-bet-only settlement, split limits, exact practice contexts, the 250-round boundary, scheduling transitions, analytics separation, database corruption, locking, and round-trip persistence.
+The regression tests cover strategy chart boundaries and legal fallbacks, multiple aces, natural/split payouts, insurance, original-bet-only settlement, split limits, exact practice contexts, the 250-round boundary, scheduling transitions, analytics separation, six-deck card-counting boundaries and Hi-Lo values, database corruption, locking, and round-trip persistence.
 
 Development verification exercised debug and optimized native Linux windows with real mouse/keyboard input: dealing, mistake feedback with the chosen move applied, the 249-to-250 assessment transition (including keeping the final correction visible), heatmaps at the minimum window size, a targeted hand, a 12-hand review plan, and persisted progress after closing. Engine smoke exercised 10,000 completed rounds and replayed 675 observed contexts as practice hands. The Apple Silicon target was checked with `cargo check --locked --target aarch64-apple-darwin`.
 
