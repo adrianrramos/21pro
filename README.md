@@ -86,7 +86,29 @@ For a long-running headless inspection session, run this from the worktree and s
 
 Inspection has **no authentication** and grants control of the app. Keep the endpoint on loopback, use a different port for each concurrent worktree, and use an SSH tunnel if the client runs elsewhere. The feature does not open an endpoint when `EGUI_INSPECTION` is unset or `0`. The screenshot script explicitly disables inspection.
 
-Headless verification exercised Mesa `llvmpipe` with unusable inherited display settings: initial screenshot, live inspection tree, Enter input, and a screenshot of the dealt hand. The 30 existing tests also passed with both development features enabled. Deterministic fixture/baseline coverage remains separate.
+Headless verification exercises Mesa `llvmpipe` with unusable inherited display settings: initial screenshot, live inspection tree, keyboard input, and a screenshot of a dealt hand. The Rust tests also pass with both development features enabled. Deterministic fixture/baseline coverage remains separate.
+
+#### Committed semantic Free Play smoke
+
+Run the committed happy-path and failure-path native UI checks with an isolated
+profile:
+
+```sh
+./scripts/free_play_visual.py
+```
+
+The script requires `xvfb-run`, Mesa software OpenGL, `cargo`, and the verified
+`egui-mcp` 0.2.0 server. It chooses a free loopback inspection port; set
+`EGUI_INSPECTION_PORT` when a specific unused port is needed. Set
+`VISUAL_ARTIFACT_DIR` to choose where the supporting PNG screenshots are saved;
+the default is `target/visual/`.
+
+The semantic assertions cover Play navigation, the initial bankroll and chip
+labels, disabled Deal and Yellow controls, exact mixed-chip wagering, dealing
+and hidden-hole-card accessibility, narrow-window discovery, invalid and
+cancelled reset, unfinished-round restart, and an unaffordable keyboard
+Double. Card ranks are intentionally not asserted. Screenshots are review
+artifacts, not pixel baselines.
 
 #### Agent control through MCP
 

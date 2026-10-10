@@ -27,3 +27,16 @@ Use the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/) as th
 Before changing an exported type, function, enum, serialized representation, or module boundary, inspect its callers and tests. Prefer a small compatible API over a speculative abstraction. Update all affected call sites and documentation in the same change. Run `cargo fmt --check`, `cargo check`, and the relevant tests after Rust changes; use Clippy when available for API or idiom changes.
 
 The upstream guidelines are the authority for details and rationale. Project requirements and an explicitly documented compatibility constraint take precedence over a guideline when they conflict.
+
+## Native UI visual tests
+
+Every visual change MUST include one committed semantic happy-path scenario and one relevant failure-path assertion. Screenshots are supporting evidence, not the primary pass/fail oracle.
+
+- Prefer accessibility-tree assertions over coordinates.
+- Use stable text/role locators, not widget IDs or pixel positions.
+- Do not assert exact card ranks because the shoe is randomized.
+- Do not use screenshot pixel baselines for dynamic cards, fonts, or cross-platform rendering.
+- Save screenshots as CI artifacts for review; use semantic assertions for pass/fail.
+- Keep save-failure and corrupt-database cases in Rust/storage tests, where failures are deterministic.
+- Run the UI scenario with an isolated profile and a unique inspection port.
+- Keep the inspection endpoint on loopback; it has no authentication.
