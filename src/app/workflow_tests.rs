@@ -134,6 +134,20 @@ fn complete_personalized_practice_without_advancing_table_baseline() {
 }
 
 #[test]
+fn variance_visualizer_runs_without_unlocking_training() {
+    let mut harness = fixture(Fixture::TableReady);
+    click(&mut harness, "05   Variance Visualizer");
+    harness.get_by_label("Example inputs only. Enter hourly EV and standard deviation for the game and betting strategy you want to explore. These values are not calculated from your training results.");
+    harness.get_by_label("Run simulation").click();
+    harness.run();
+    harness.get_by_label("Displayed result snapshot");
+    harness.get_by_label("Unstopped EV reference at hour 500: $19465.00");
+    harness.get_by_label("0 rounds");
+    click(&mut harness, "01   The table");
+    harness.get_by_label("Deal first hand  [Enter]");
+}
+
+#[test]
 fn counting_trial_from_fixture_is_assessed_without_advancing_table_baseline() {
     let mut harness = fixture(Fixture::TableReady);
     harness.get_by_label("0 rounds");

@@ -35,6 +35,12 @@ The application area for understanding recorded performance through accuracy, tr
 **Rules**:
 The reference area explaining the supported blackjack rules, strategy sources, statistical meanings, and local data storage. It is not currently a ruleset editor.
 
+**Variance Visualizer**:
+An offline educational tool that samples hourly bankroll paths from editable EV, standard deviation, bankroll, duration, and player-count inputs. Its analytical lines and stopped, rounded paths illustrate variance; they are not forecasts or a risk-of-ruin estimate.
+
+**Hourly standard deviation**:
+The dollar standard deviation of a simulated result over one hour. It is not variance, a percentage, or per-hand standard deviation.
+
 ### Live and blackjack
 
 **Ruleset**:

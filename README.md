@@ -137,14 +137,16 @@ Capture any of these scenes without playing through a personal profile:
 | `table-feedback` | That same hand after standing: settlement and strategy correction |
 | `insights` | 250 simulated table rounds with mixed correct decisions and mistakes |
 | `practice` | First hand of a 12-hand plan derived from that history |
+| `variance` | Variance Visualizer with the reference example already simulated |
 | `rules` | Rules page with the completed sample baseline |
 
 ```sh
 ./scripts/screenshot.sh target/visual/table-opening.png table-opening
+./scripts/screenshot.sh target/visual/variance.png variance
 ./scripts/screenshot.sh target/visual/insights.png insights
 
 # Capture every scene:
-for fixture in table-ready table-opening table-feedback insights practice rules; do
+for fixture in table-ready table-opening table-feedback insights practice variance rules; do
     ./scripts/screenshot.sh "target/visual/$fixture.png" "$fixture"
 done
 ```
@@ -284,6 +286,27 @@ References: [Microsoft WSL GUI support](https://learn.microsoft.com/en-us/window
 | I / N | Take / decline insurance |
 
 Buttons expose the same actions. Illegal moves are disabled. Feedback stays visible in a fixed panel even when the table scrolls. AccessKit support is enabled; drawn card groups have accessible descriptions that do not reveal the dealer's hidden card.
+
+## Variance Visualizer
+
+Open **Variance Visualizer** directly from the sidebar; it is available on a fresh profile and does not require the 250-round baseline. Enter hourly EV, hourly standard deviation, starting bankroll, hours, and 1–9 simulated players, then run the model. Monetary values are dollars; SD is the dollar standard deviation of one hour. Inputs are bounded and validated, with at most two decimal places for monetary fields.
+
+The chart shows an unstopped analytical EV line and optional ±1/±2 SD reference bands alongside rounded, stopping player paths. EV grows linearly while accumulated SD grows with the square root of time. A depleted path keeps its signed crossing balance and then freezes. This is an educational Gaussian hourly model: it does not deal cards, resize bets, replenish bankroll, estimate risk of ruin, or predict profit. More players show different possible histories; they do not change the odds.
+
+Visualizer inputs, the last successful result, and the SD-line display setting are session-only. Navigating away preserves them; restarting resets them. Running it does not change training progress, table state, counting history, or the saved profile. Use the hover readout for a nearest-hour view; the text summary remains available without hover.
+
+### Native verification
+
+The development checks for this feature are:
+
+```sh
+cargo fmt --all --check
+cargo check --locked --all-targets --all-features
+cargo test --locked --all-targets --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
+```
+
+For native visual verification, use the isolated-profile `dev-inspection` workflow described above. Run the example, rerun, inspect one- and nine-player views, toggle SD lines, resize to the minimum window, exercise negative-EV depletion, zero-SD/zero-bankroll, invalid inputs, navigation away/back, and the maximum bounds. This is separate from unit and workflow tests.
 
 ## Exact rules and provenance
 
