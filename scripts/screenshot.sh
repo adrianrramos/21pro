@@ -7,9 +7,13 @@ if (( $# > 1 )); then
 fi
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 output=${1:-target/visual/table.png}
+output_dir=$(dirname -- "$output")
+output_name=$(basename -- "$output")
 sandbox=$(mktemp -d)
 trap 'rm -rf -- "$sandbox"' EXIT
-
+mkdir -p -- "$output_dir"
+temporary_output=$(mktemp "$output_dir/.${output_name}.tmp.XXXXXX")
+trap 'rm -rf -- "$sandbox" "$temporary_output"' EXIT
 # Capture into a fresh directory so an old screenshot cannot count as success.
 env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
     LIBGL_ALWAYS_SOFTWARE=1 WINIT_X11_SCALE_FACTOR=1 \
@@ -19,6 +23,6 @@ env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
     cargo run --locked --features dev-screenshot
 
 test -s "$sandbox/table.png"
-mkdir -p -- "$(dirname -- "$output")"
-cp -- "$sandbox/table.png" "$output"
+cp -- "$sandbox/table.png" "$temporary_output"
+mv -f -- "$temporary_output" "$output"
 printf 'Screenshot saved to %s\n' "$output"
