@@ -173,6 +173,46 @@ pixel equality across fonts, renderers, architectures, or dependency upgrades.
 Images remain review artifacts under `target/visual/`; no golden images or pixel
 comparison tolerances are committed.
 
+#### User workflow tests with egui_kittest
+
+[`egui_kittest` 0.36.2](https://docs.rs/egui_kittest/0.36.2/egui_kittest/)
+is a development-only dependency, matched to the app's egui/eframe version.
+Run the workflow suite directly, or as part of ordinary `cargo test`:
+
+```sh
+cargo test --locked --bin twenty-one-pro app::workflow_tests
+```
+
+No `DISPLAY`, WSLg, Xvfb, MCP server, or GPU is needed for these tests. They use
+`Harness::builder().build_eframe(...)` with the real `TrainerApp`, its normal widget tree,
+pointer/keyboard events, and AccessKit queries at 1180×860. Only user input is
+simulated; game rules, strategy feedback, scheduling, and redb saves are real.
+Each test owns a disposable fixture profile and fixed clock/seeds, without
+changing process-wide environment variables. Fixtures compile automatically
+under `cfg(test)`; passing `--features dev-fixtures` is not required.
+
+`src/app/workflow_tests.rs` covers:
+
+- Deal, stand by keyboard, see correction and a completed round, then use Enter
+  to deal a natural that settles and counts without another decision.
+- Ignore a disabled Split button and shortcut, then accept and score a legal
+  surrender with the correct half-unit result.
+- Keep both insights and practice locked at 249 rounds; dealing alone does not
+  unlock them. Settling round 250 opens the assessment and focused practice.
+- Start and finish a 12-hand personalized plan, report its decision count, and
+  return to the table without increasing the table-round baseline.
+
+Regression sensitivity was checked by temporarily removing round settlement:
+all four workflow tests failed, then passed after restoration. The full suite
+also passed with default and all development features, with display variables
+unset. Native Xvfb/MCP smoke separately exercised table correction followed by a
+natural and a complete 12-hand plan; the captured completion screen retained
+the 250-round baseline.
+
+These are behavior tests, not image comparisons or proof of native platform
+integration. Screenshot rendering remains the separate fixture/MCP workflow
+above; no `wgpu`/`snapshot` features, golden PNGs, or `kittest.toml` are needed.
+
 #### WSLg development over SSH
 
 WSLg needs a working Windows desktop connection as well as an X11 socket. On this host, starting WSL from SSH without a signed-in Windows desktop left WSLg's `msrdc.exe` in noninteractive Session 0. X11 connections timed out and Weston repeatedly exited with signal 11. Restarting WSL from the signed-in desktop moved `msrdc.exe` to Session 1 and restored native rendering. This is an observed recovery, not a diagnosis of every Weston crash.
