@@ -642,13 +642,13 @@ impl TrainerApp {
             w::metric(
                 &mut columns[0],
                 "AVAILABLE FUNDS",
-                &play::money(self.play.available_cents),
+                &play::money(self.play.available_cents()),
                 "Not committed",
             );
             w::metric(
                 &mut columns[1],
                 "COMMITTED STAKES",
-                &play::money(self.play.committed_cents),
+                &play::money(self.play.committed_cents()),
                 "Reserved in this round",
             );
             w::metric(
@@ -673,12 +673,12 @@ impl TrainerApp {
         ui.add_space(14.0);
         let narrow = ui.available_width() < 820.0;
         if narrow {
-            w::game_table(ui, &self.play.game);
+            w::game_table(ui, self.play.game());
             self.play_controls(ui, command);
             self.play_chart(ui);
         } else {
             ui.columns(2, |columns| {
-                w::game_table(&mut columns[0], &self.play.game);
+                w::game_table(&mut columns[0], self.play.game());
                 self.play_controls(&mut columns[0], command);
                 self.play_chart(&mut columns[1]);
             });
@@ -733,23 +733,21 @@ impl TrainerApp {
             ui.label(RichText::new("Build your base wager").size(20.0).strong());
             ui.label(format!(
                 "Pending wager: {} · locked wager: {}",
-                play::money(self.play.pending_wager_cents),
+                play::money(self.play.pending_wager_cents()),
                 self.play
-                    .locked_wager_cents
+                    .locked_wager_cents()
                     .map_or("none".to_owned(), play::money)
             ));
             if matches!(self.play.phase(), Phase::Ready | Phase::Finished) {
                 if self.play.phase() == Phase::Finished
-                    && let Some(result) = &self.play.game.result
+                    && let Some(result) = &self.play.game().result
+                    && let Some(wager) = self.play.locked_wager_cents()
                 {
                     for outcome in &result.outcomes {
                         ui.label(format!(
                             "{} · {}",
                             outcome.label,
-                            play::money(
-                                i64::from(outcome.net_half_units) * self.play.current_wager_cents()
-                                    / 2,
-                            ),
+                            play::money(i64::from(outcome.net_half_units) * wager / 2),
                         ));
                     }
                 }
@@ -786,7 +784,9 @@ impl TrainerApp {
                         .corner_radius(20);
                         if ui
                             .add_enabled(
-                                cents <= self.play.available_cents - self.play.pending_wager_cents,
+                                cents
+                                    <= self.play.available_cents()
+                                        - self.play.pending_wager_cents(),
                                 button,
                             )
                             .on_hover_text(format!(
@@ -801,17 +801,14 @@ impl TrainerApp {
                 });
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(
-                            !self.play.wager_chips.is_empty(),
-                            egui::Button::new("Undo chip"),
-                        )
+                        .add_enabled(self.play.has_wager_chips(), egui::Button::new("Undo chip"))
                         .clicked()
                     {
                         *command = Some(Command::PlayUndo);
                     }
                     if ui
                         .add_enabled(
-                            self.play.pending_wager_cents > 0,
+                            self.play.pending_wager_cents() > 0,
                             egui::Button::new("Clear wager"),
                         )
                         .clicked()
@@ -819,8 +816,8 @@ impl TrainerApp {
                         *command = Some(Command::PlayClear);
                     }
                 });
-                let can_deal = self.play.pending_wager_cents >= play::MINIMUM_WAGER_CENTS
-                    && self.play.pending_wager_cents <= self.play.available_cents;
+                let can_deal = self.play.pending_wager_cents() >= play::MINIMUM_WAGER_CENTS
+                    && self.play.pending_wager_cents() <= self.play.available_cents();
                 if ui
                     .add_enabled(
                         can_deal,
@@ -838,14 +835,14 @@ impl TrainerApp {
                 if !can_deal {
                     w::muted(
                         ui,
-                        if self.play.available_cents < play::MINIMUM_WAGER_CENTS {
+                        if self.play.available_cents() < play::MINIMUM_WAGER_CENTS {
                             "Available funds are below $5. Reset to choose a new bankroll."
                         } else {
                             "Add chips totaling at least $5 before dealing."
                         },
                     );
                 }
-            } else if let Some(situation) = self.play.game.situation() {
+            } else if let Some(situation) = self.play.game().situation() {
                 ui.label(RichText::new("Choose an action").size(20.0).strong());
                 ui.horizontal_wrapped(|ui| {
                     for action in Action::ALL {
@@ -891,13 +888,13 @@ impl TrainerApp {
         w::panel().show(ui, |ui| {
             ui.label(RichText::new("Session P/L").size(20.0).strong());
             ui.label("Cumulative settled dollars relative to the starting bankroll.");
-            let history = &self.play.history;
-            let values: Vec<f32> = history
+            let history = self.play.history();
+            let (min, max) = history
                 .iter()
                 .map(|point| point.cumulative_net_cents as f32 / 100.0)
-                .collect();
-            let min = values.iter().copied().fold(0.0, f32::min);
-            let max = values.iter().copied().fold(0.0, f32::max);
+                .fold((0.0_f32, 0.0_f32), |(min, max), value| {
+                    (min.min(value), max.max(value))
+                });
             let padding = ((max - min) * 0.12).max(1.0);
             let low = min - padding;
             let high = max + padding;

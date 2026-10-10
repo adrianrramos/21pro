@@ -5,12 +5,21 @@ use thiserror::Error;
 use crate::game::{Game, GameError, Phase};
 use crate::model::Action;
 
+/// Schema version for the persisted Free Play session.
 pub const FREE_PLAY_SCHEMA_VERSION: u32 = 1;
+/// Default simulated bankroll in cents.
 pub const DEFAULT_BANKROLL_CENTS: i64 = 100_000;
+/// Minimum base wager and chip unit in cents.
 pub const MINIMUM_WAGER_CENTS: i64 = 500;
+/// Supported Free Play chip denominations in cents.
 pub const CHIP_DENOMINATIONS: [i64; 4] = [500, 2_500, 10_000, 100_000];
 const MAX_MONEY_CENTS: i64 = i64::MAX / 4;
+const MAX_STARTING_BANKROLL_CENTS: i64 = MAX_MONEY_CENTS / 8;
 
+/// One settled Free Play graph point.
+///
+/// All monetary values are integer cents. Round zero is the starting bankroll
+/// with zero cumulative profit or loss.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayPoint {
     pub round: u32,
@@ -42,18 +51,22 @@ pub enum PlayError {
     Game(#[from] GameError),
 }
 
+/// The complete persisted Free Play session.
+///
+/// Monetary values are integer cents. The game, wager, funds, graph, and
+/// settlement flag are saved together and validated before storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaySession {
-    pub schema_version: u32,
-    pub starting_bankroll_cents: i64,
-    pub available_cents: i64,
-    pub committed_cents: i64,
-    pub pending_wager_cents: i64,
-    pub wager_chips: Vec<i64>,
-    pub locked_wager_cents: Option<i64>,
-    pub history: Vec<PlayPoint>,
-    pub game: Game,
-    pub round_settled: bool,
+    schema_version: u32,
+    starting_bankroll_cents: i64,
+    available_cents: i64,
+    committed_cents: i64,
+    pending_wager_cents: i64,
+    wager_chips: Vec<i64>,
+    locked_wager_cents: Option<i64>,
+    history: Vec<PlayPoint>,
+    game: Game,
+    round_settled: bool,
 }
 
 impl PlaySession {
@@ -77,16 +90,56 @@ impl PlaySession {
         }
     }
 
+    /// Returns the current game phase.
     pub fn phase(&self) -> Phase {
         self.game.phase
     }
 
+    /// Returns funds not reserved by the current round.
+    pub fn available_cents(&self) -> i64 {
+        self.available_cents
+    }
+
+    /// Returns funds reserved by the current round.
+    pub fn committed_cents(&self) -> i64 {
+        self.committed_cents
+    }
+
+    /// Returns the wager currently being assembled.
+    pub fn pending_wager_cents(&self) -> i64 {
+        self.pending_wager_cents
+    }
+
+    /// Returns the base wager locked for the active or last settled round.
+    pub fn locked_wager_cents(&self) -> Option<i64> {
+        self.locked_wager_cents
+    }
+
+    /// Returns whether the pending wager contains at least one chip.
+    pub fn has_wager_chips(&self) -> bool {
+        !self.wager_chips.is_empty()
+    }
+
+    /// Returns the complete settled-round history.
+    pub fn history(&self) -> &[PlayPoint] {
+        &self.history
+    }
+
+    /// Returns the game for read-only rendering and inspection.
+    pub fn game(&self) -> &Game {
+        &self.game
+    }
+
+    /// Returns the number of undealt cards in the current shoe.
     pub fn remaining_cards(&self) -> usize {
         self.game.remaining_cards()
     }
-
     pub fn current_wager_cents(&self) -> i64 {
-        self.locked_wager_cents.unwrap_or(self.pending_wager_cents)
+        if self.phase() == Phase::Finished && self.pending_wager_cents > 0 {
+            self.pending_wager_cents
+        } else {
+            self.locked_wager_cents.unwrap_or(self.pending_wager_cents)
+        }
     }
 
     pub fn cumulative_net_cents(&self) -> i64 {
@@ -108,9 +161,6 @@ impl PlaySession {
             .ok_or(PlayError::MoneyOverflow)?;
         if next > self.available_cents {
             return Err(PlayError::InsufficientFunds);
-        }
-        if self.phase() == Phase::Finished && self.pending_wager_cents == 0 {
-            self.locked_wager_cents = None;
         }
         self.pending_wager_cents = next;
         self.wager_chips.push(cents);
@@ -259,7 +309,8 @@ impl PlaySession {
                 ));
             }
         }
-        Game::from_snapshot(self.game.snapshot())
+        self.game
+            .validate()
             .map_err(|error| PlayError::InvalidSnapshot(error.to_string()))?;
         let expected_committed = i64::from(self.game.stake_half_units())
             .checked_mul(self.locked_wager_cents.unwrap_or(0))
@@ -306,9 +357,7 @@ impl PlaySession {
             Phase::Finished => {
                 if !self.round_settled
                     || self.committed_cents != 0
-                    || self.history.last().unwrap().bankroll_cents != self.available_cents
-                    || (self.pending_wager_cents == 0 && self.locked_wager_cents.is_none())
-                    || (self.pending_wager_cents > 0 && self.locked_wager_cents.is_some())
+                    || self.locked_wager_cents.is_none()
                 {
                     return Err(PlayError::InvalidSnapshot(
                         "settled funds are inconsistent".to_owned(),
@@ -388,8 +437,8 @@ pub fn parse_money_cents(input: &str) -> Result<i64, PlayError> {
 }
 
 pub fn validate_bankroll(cents: i64) -> Result<(), PlayError> {
-    if !(1..=MAX_MONEY_CENTS).contains(&cents) {
-        return Err(if cents > MAX_MONEY_CENTS {
+    if !(1..=MAX_STARTING_BANKROLL_CENTS).contains(&cents) {
+        return Err(if cents > MAX_STARTING_BANKROLL_CENTS {
             PlayError::MoneyOverflow
         } else {
             PlayError::InvalidMoney
@@ -562,7 +611,47 @@ mod tests {
         session.act(Action::Stand).unwrap();
         session.add_chip(500).unwrap();
         session.validate().unwrap();
-        assert_eq!(session.locked_wager_cents, None);
+        assert_eq!(session.locked_wager_cents, Some(500));
         assert_eq!(session.pending_wager_cents, 500);
+    }
+
+    #[test]
+    fn continuous_shoe_rounds_remain_saveable() {
+        let mut session = PlaySession::new(21);
+        for _ in 0..3 {
+            session.add_chip(500).unwrap();
+            session.deal().unwrap();
+            while session.phase() != Phase::Finished {
+                let action = if session.phase() == Phase::Insurance {
+                    Action::DeclineInsurance
+                } else {
+                    Action::Stand
+                };
+                session.act(action).unwrap();
+            }
+            session.validate().unwrap();
+        }
+        assert_eq!(session.history.len(), 4);
+    }
+
+    #[test]
+    fn starting_bankroll_leaves_headroom_for_settlement() {
+        let mut session = prepared_session(&[11, 10], &[10, 6]);
+        session.starting_bankroll_cents = MAX_STARTING_BANKROLL_CENTS;
+        session.available_cents = MAX_STARTING_BANKROLL_CENTS - 500;
+        session.history[0].bankroll_cents = MAX_STARTING_BANKROLL_CENTS;
+        session.act(Action::Stand).unwrap();
+        session.validate().unwrap();
+        assert!(parse_money_cents(&(MAX_STARTING_BANKROLL_CENTS / 100 + 1).to_string()).is_err());
+    }
+
+    #[test]
+    fn finished_round_keeps_settled_wager_when_building_next_wager() {
+        let mut session = prepared_session(&[11, 10], &[10, 6]);
+        session.act(Action::Stand).unwrap();
+        session.add_chip(10_000).unwrap();
+        assert_eq!(session.locked_wager_cents, Some(500));
+        assert_eq!(session.current_wager_cents(), 10_000);
+        assert_eq!(session.pending_wager_cents, 10_000);
     }
 }

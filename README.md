@@ -222,8 +222,6 @@ cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-The regression tests cover strategy chart boundaries and legal fallbacks, multiple aces, natural/split payouts, insurance, original-bet-only settlement, split limits, exact practice contexts, the 250-round boundary, scheduling transitions, analytics separation, six-deck card-counting boundaries and Hi-Lo values, database corruption, locking, and round-trip persistence.
+The regression suite covers strategy boundaries, multiple aces, natural/split payouts, insurance, original-bet-only settlement, split limits, exact practice contexts, the 250-round boundary, scheduling transitions, analytics separation, six-deck card-counting boundaries and Hi-Lo values, database corruption, locking, and round-trip persistence.
 
-Development verification exercised debug and optimized native Linux windows with real mouse/keyboard input: dealing, mistake feedback with the chosen move applied, the 249-to-250 assessment transition (including keeping the final correction visible), heatmaps at the minimum window size, a targeted hand, a 12-hand review plan, and persisted progress after closing. Engine smoke exercised 10,000 completed rounds and replayed 675 observed contexts as practice hands. The Apple Silicon target was checked with `cargo check --locked --target aarch64-apple-darwin`.
-
-**Not verified in the Linux development environment:** actual macOS launching, VoiceOver behavior, `.app` bundling on macOS, or signing/notarization. Build and launch on your Mac using the commands above to verify the native platform integration.
+Native UI integration still requires a real target display. Verify window launch, mouse/keyboard behavior, accessibility, narrow layouts, and persisted restart flows on the target platform; this repository does not claim those checks from headless Cargo tests.

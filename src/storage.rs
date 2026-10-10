@@ -116,6 +116,10 @@ impl Store {
         validate(&profile)?;
         Ok(profile)
     }
+    /// Loads the current versioned Free Play session.
+    ///
+    /// `None` means the database predates Free Play. Present but malformed
+    /// data is returned as an error and is never replaced with a new session.
     pub fn load_free_play(&self) -> Result<Option<PlaySession>, StorageError> {
         let read = self.database.begin_read().map_err(database_error)?;
         let table = match read.open_table(FREE_PLAY) {
@@ -349,7 +353,7 @@ mod tests {
         let reopened = Store::open(&path).unwrap();
         assert!(reopened.load().unwrap().attempts.is_empty());
         let loaded = reopened.load_free_play().unwrap().unwrap();
-        assert_eq!(loaded.pending_wager_cents, 500);
+        assert_eq!(loaded.pending_wager_cents(), 500);
         assert_eq!(loaded.remaining_cards(), session.remaining_cards());
     }
 
@@ -370,16 +374,16 @@ mod tests {
             };
             session.act(action).unwrap();
         }
-        assert_eq!(session.history.len(), 2);
+        assert_eq!(session.history().len(), 2);
         store.save_all(&profile, Some(&session)).unwrap();
         drop(store);
 
         let reopened = Store::open(&path).unwrap();
         let loaded = reopened.load_free_play().unwrap().unwrap();
         loaded.validate().unwrap();
-        assert_eq!(loaded.history.len(), 2);
-        assert_eq!(loaded.available_cents, session.available_cents);
-        assert_eq!(loaded.committed_cents, 0);
+        assert_eq!(loaded.history().len(), 2);
+        assert_eq!(loaded.available_cents(), session.available_cents());
+        assert_eq!(loaded.committed_cents(), 0);
     }
 
     #[test]
@@ -388,8 +392,9 @@ mod tests {
         let store = Store::open(&dir.path().join("profile.redb")).unwrap();
         let profile = Profile::default();
         store.save(&profile).unwrap();
-        let mut invalid = PlaySession::new(13);
-        invalid.schema_version = 99;
+        let mut invalid = serde_json::to_value(PlaySession::new(13)).unwrap();
+        invalid["schema_version"] = serde_json::json!(99);
+        let invalid: PlaySession = serde_json::from_value(invalid).unwrap();
         assert!(matches!(
             store.save_all(&profile, Some(&invalid)),
             Err(StorageError::Corrupt(_))
