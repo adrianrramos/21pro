@@ -7,6 +7,10 @@ description = "An offline blackjack basic-strategy trainer for the Yaamava six-d
 license = "MIT"
 default-run = "twenty-one-pro"
 
+[features]
+dev-inspection = ["eframe/inspection"]
+dev-screenshot = ["eframe/__screenshot"]
+
 [dependencies]
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "x11", "links", "accesskit"] }
 egui_extras = { version = "0.36.2", default-features = false, features = ["svg"] }

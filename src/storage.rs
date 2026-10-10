@@ -217,7 +217,7 @@ fn validate(profile: &Profile) -> Result<(), StorageError> {
 mod tests {
     use super::*;
     use crate::model::{Action, HandKind};
-    use crate::training::StudyMode;
+    use crate::training::{Attempt, RoundRecord, StudyMode};
 
     fn situation() -> Situation {
         Situation {
@@ -337,6 +337,43 @@ mod tests {
         let empty = dir.path().join("empty.redb");
         std::fs::write(&empty, []).unwrap();
         assert!(matches!(Store::open(&empty), Err(StorageError::Corrupt(_))));
+    }
+
+    #[test]
+    fn unreachable_practice_situations_are_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("profile.redb")).unwrap();
+        let situation = Situation {
+            kind: HandKind::Hard,
+            value: 20,
+            dealer: 6,
+            can_double: true,
+            can_split: false,
+            can_surrender: true,
+            split_aces: false,
+        };
+        let mut profile = Profile {
+            rounds: (0..250)
+                .map(|at| RoundRecord {
+                    at,
+                    net_half_units: 0,
+                })
+                .collect(),
+            ..Profile::default()
+        };
+        profile.attempts.push(Attempt {
+            situation,
+            chosen: Action::Stand,
+            expected: Action::Stand,
+            at: 1000,
+            mode: StudyMode::Table,
+        });
+        raw_snapshot(&store, &serde_json::to_vec(&profile).unwrap());
+        assert!(matches!(store.load(), Err(StorageError::Corrupt(_))));
+        assert!(matches!(
+            store.save(&profile),
+            Err(StorageError::Corrupt(_))
+        ));
     }
 
     #[test]
