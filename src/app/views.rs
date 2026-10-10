@@ -1,4 +1,4 @@
-use super::{Command, Page, TrainerApp, now, widgets as w};
+use super::{Command, Page, TrainerApp, widgets as w};
 use eframe::egui::{self, RichText, Stroke, vec2};
 use twenty_one_pro::{
     game::Phase,
@@ -81,13 +81,9 @@ impl TrainerApp {
                         .color(w::MUTED),
                 );
                 ui.label(
-                    RichText::new(if self.dirty {
-                        "UNSAVED CHANGES"
-                    } else {
-                        "PROGRESS SAVED LOCALLY"
-                    })
-                    .size(10.0)
-                    .color(if self.dirty { w::GOLD } else { w::GREEN }),
+                    RichText::new(self.save_status())
+                        .size(10.0)
+                        .color(if self.dirty { w::GOLD } else { w::GREEN }),
                 );
             });
     }
@@ -199,7 +195,7 @@ impl TrainerApp {
                 ui.label(RichText::new("Baseline complete. Your personalized training is ready.").strong().color(w::GREEN));
                 w::muted(ui, "250 rounds is a starting sample, not proof of mastery. Rare hands may still be unseen.");
                 ui.horizontal_wrapped(|ui| {
-                    if w::primary(ui, "Start focused practice").clicked() { *command = Some(Command::StartPractice(self.profile.practice_queue(now(), 12))); }
+                    if w::primary(ui, "Start focused practice").clicked() { *command = Some(Command::StartPractice(self.profile.practice_queue(self.now(), 12))); }
                     if ui.button("See my last hand").clicked() { self.page = Page::Table; }
                     if ui.small_button("Dismiss").clicked() { self.just_unlocked = false; }
                 });
@@ -319,7 +315,7 @@ impl TrainerApp {
                         skill.stats.mistakes, skill.stats.attempts
                     ));
                     ui.label(
-                        RichText::new(w::due_label(skill.due_at, now()))
+                        RichText::new(w::due_label(skill.due_at, self.now()))
                             .size(12.0)
                             .color(w::MUTED),
                     );
@@ -409,7 +405,7 @@ impl TrainerApp {
             });
             ui.add_space(14.0);
         }
-        let time = now();
+        let time = self.now();
         let due = self.profile.due_count(time);
         let next_due = self
             .profile
@@ -501,7 +497,7 @@ impl TrainerApp {
         ui.add_space(14.0);
         w::panel().show(ui, |ui| {
             ui.label(RichText::new("Your data stays here").strong());
-            ui.label(self.data_path.display().to_string());
+            ui.label(self.data_path_label());
             if ui.button("Copy data path").clicked() { ui.ctx().copy_text(self.data_path.display().to_string()); }
             w::muted(ui, "Decisions, completed rounds, and review schedules are saved after every move. An unfinished hand is not resumed after closing. Close the app before copying the database as a backup. No telemetry or network service is used; source links open only when clicked.");
         });

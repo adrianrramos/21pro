@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::game::valid_practice_situation;
 use crate::model::{ASSESSMENT_ROUNDS, Action, HandKind, RULESET_ID, Situation};
 use crate::strategy::recommendation;
 
@@ -287,31 +288,9 @@ fn lapse(review: &mut ReviewState, at: i64) {
     review.due_at = at.saturating_add(RELEARNING_SECONDS);
 }
 
-/// Structural checks for persisted decisions. The engine owns card-level legality.
+/// Validate persisted decisions against the engine's reachable practice contexts.
 pub(crate) fn valid_situation(s: Situation) -> bool {
-    if s.kind == HandKind::Insurance {
-        return s.value == 0
-            && s.dealer == 11
-            && !s.can_double
-            && !s.can_split
-            && !s.can_surrender
-            && !s.split_aces;
-    }
-    if !(2..=11).contains(&s.dealer)
-        || (s.can_split && s.kind != HandKind::Pair)
-        || (s.can_surrender && !s.can_double)
-    {
-        return false;
-    }
-    if s.split_aces {
-        return s.kind == HandKind::Pair && s.value == 11 && !s.can_double && !s.can_surrender;
-    }
-    match s.kind {
-        HandKind::Hard => (4..=20).contains(&s.value),
-        HandKind::Soft => (13..=20).contains(&s.value),
-        HandKind::Pair => (2..=11).contains(&s.value),
-        HandKind::Insurance => unreachable!(),
-    }
+    valid_practice_situation(s)
 }
 
 #[cfg(test)]

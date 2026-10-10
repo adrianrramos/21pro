@@ -56,16 +56,17 @@ From an isolated development worktree:
 ./scripts/screenshot.sh target/visual/review.png
 ```
 
-The script builds with `dev-screenshot`, uses a fresh disposable profile even if `TWENTY_ONE_PRO_DATA_DIR` was already set, and writes `target/visual/table.png` by default. It fixes X11 scaling to 1 on a 1280×1024 virtual display, captures the app's 1180×860 initial window, then exits and removes the temporary profile/display. It overwrites the selected output only after a new capture succeeds. Generated images stay under the ignored `target/` directory when using the examples above.
+The script builds with `dev-screenshot`, uses a fresh disposable profile even if `TWENTY_ONE_PRO_DATA_DIR` was already set, and writes `target/visual/table.png` by default. It fixes X11 scaling to 1 on a 1280×1024 virtual display, captures the app's 1180×860 initial window, then exits and removes the temporary profile/display. It overwrites the selected output only after a new capture succeeds. A second argument selects a deterministic fixture and also enables `dev-fixtures`; without it, an inherited `TWENTY_ONE_PRO_FIXTURE` is cleared. Generated images stay under the ignored `target/` directory when using the examples above.
 
-**Inspect the image before claiming visual success.** This is a real-render smoke command, not a pixel-baseline test or a full interaction test. It captures the initial table; later hands remain random. Software-rendered Linux pixels do not prove Windows/macOS desktop integration or GPU performance.
+**Inspect the image before claiming visual success.** This is a real-render smoke command, not a pixel-baseline test or a full interaction test. Without a fixture it captures the initial table and later hands remain random. Software-rendered Linux pixels do not prove Windows/macOS desktop integration or GPU performance.
 
-Development features are opt-in; normal builds enable neither:
+Development features are opt-in; normal builds enable none:
 
 | Cargo feature | Runtime control | Purpose |
 | --- | --- | --- |
 | `dev-screenshot` | `EFRAME_SCREENSHOT_TO=/absolute/path.png` | eframe's Glow startup capture, then exit; the script sets this automatically |
 | `dev-inspection` | `EGUI_INSPECTION=127.0.0.1:5719` | Live accessibility tree, input injection, resize, and PNG capture |
+| `dev-fixtures` | `TWENTY_ONE_PRO_FIXTURE=<name>` | Repeatable scenes with a fixed clock, game seeds, and disposable data |
 
 For a long-running headless inspection session, run this from the worktree and stop with Ctrl+C when finished:
 
@@ -75,7 +76,7 @@ For a long-running headless inspection session, run this from the worktree and s
     trap 'rm -rf -- "$sandbox"' EXIT
     env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u EFRAME_SCREENSHOT_TO \
         LIBGL_ALWAYS_SOFTWARE=1 WINIT_X11_SCALE_FACTOR=1 \
-        XDG_RUNTIME_DIR="$sandbox" TWENTY_ONE_PRO_DATA_DIR="$sandbox/profile" \
+        TMPDIR="$sandbox" XDG_RUNTIME_DIR="$sandbox" TWENTY_ONE_PRO_DATA_DIR="$sandbox/profile" \
         EGUI_INSPECTION=127.0.0.1:5719 \
         xvfb-run -a -s '-screen 0 1280x1024x24 -dpi 96 -nolisten tcp' \
         cargo run --locked --features dev-inspection
@@ -84,7 +85,7 @@ For a long-running headless inspection session, run this from the worktree and s
 
 Inspection has **no authentication** and grants control of the app. Keep the endpoint on loopback, use a different port for each concurrent worktree, and use an SSH tunnel if the client runs elsewhere. The feature does not open an endpoint when `EGUI_INSPECTION` is unset or `0`. The screenshot script explicitly disables inspection.
 
-Headless verification exercised Mesa `llvmpipe` with unusable inherited display settings: initial screenshot, live inspection tree, Enter input, and a screenshot of the dealt hand. The 30 existing tests also passed with both development features enabled. Deterministic fixture/baseline coverage remains separate.
+Headless verification exercised Mesa `llvmpipe` with unusable inherited display settings: initial screenshot, live inspection tree, Enter input, and a screenshot of the dealt hand.
 
 #### Agent control through MCP
 
@@ -122,6 +123,55 @@ For concurrent worktrees, pass each app's distinct inspection port to `attach`; 
 Verification used omp's actual project discovery and `/mcp test egui`, then the configured server's stdio MCP protocol to attach to Xvfb, find and click **Deal first hand**, observe the replacement action buttons, and capture the native 1180×860 window. MCP and omp exited cleanly; the app/display and disposable profile were removed. This verifies the integration without requiring an AI model call.
 
 Server documentation: [`egui_mcp` 0.2.0](https://docs.rs/crate/egui_mcp/0.2.0).
+
+#### Deterministic visual fixtures
+
+Capture any of these scenes without playing through a personal profile:
+
+| Fixture | Starting state |
+| --- | --- |
+| `table-ready` | Empty history and a seeded shoe, ready to deal |
+| `table-opening` | Hard 16 against dealer 10, with the hole card hidden |
+| `table-feedback` | That same hand after standing: settlement and strategy correction |
+| `insights` | 250 simulated table rounds with mixed correct decisions and mistakes |
+| `practice` | First hand of a 12-hand plan derived from that history |
+| `rules` | Rules page with the completed sample baseline |
+
+```sh
+./scripts/screenshot.sh target/visual/table-opening.png table-opening
+./scripts/screenshot.sh target/visual/insights.png insights
+
+# Capture every scene:
+for fixture in table-ready table-opening table-feedback insights practice rules; do
+    ./scripts/screenshot.sh "target/visual/$fixture.png" "$fixture"
+done
+```
+
+For interactive MCP inspection, use the long-running headless command above with
+`TWENTY_ONE_PRO_FIXTURE=practice` added to `env` and
+`--features dev-inspection,dev-fixtures` on `cargo run`. The clock remains fixed
+at Unix time `1800000000`; subsequent deals and practice hands follow seeded
+sequences. The app uses its normal engine, learning logic, and real redb saves.
+Each fixture run creates its own temporary database and **never opens the normal
+data path**, including `TWENTY_ONE_PRO_DATA_DIR`. The sidebar marks fixture runs;
+the Rules page uses a stable temporary-profile label instead of a random path.
+Unknown names, including an empty name, fail startup rather than falling back to
+personal data. Setting the selector without `dev-fixtures` also fails startup.
+With no selector, even a feature-enabled build behaves normally.
+
+A normal app close drops the fixture directory. The shell examples also place
+temporary files inside the shell-owned sandbox: this matters because eframe's
+startup screenshot exits without running Rust destructors, and killing an
+interactive app can do the same.
+
+Verification captured all six scenes twice in separate processes: each pair was
+byte-identical at 1180×860 and left no temporary files behind. A direct native run
+with a deliberately unreadable personal-profile sentinel still rendered the
+fixture without touching that file; an unknown fixture failed without a capture.
+This establishes repeatability on the verified Linux/Mesa setup, not portable
+pixel equality across fonts, renderers, architectures, or dependency upgrades.
+Images remain review artifacts under `target/visual/`; no golden images or pixel
+comparison tolerances are committed.
 
 #### WSLg development over SSH
 

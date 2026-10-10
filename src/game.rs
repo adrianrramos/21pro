@@ -343,25 +343,9 @@ impl Game {
     /// (as explained by Situation::context), not fictitious live sibling hands.
     pub fn practice(target: Situation, seed: u64) -> Result<Self, GameError> {
         let invalid = GameError::InvalidPractice;
-        if !(2..=11).contains(&target.dealer) {
-            return Err(invalid("dealer upcard must be 2 through ace"));
-        }
+        let values = validate_practice_target(target).map_err(invalid)?;
         let mut game = Self::new(seed);
         if target.kind == HandKind::Insurance {
-            let canonical = Situation {
-                kind: HandKind::Insurance,
-                value: 0,
-                dealer: 11,
-                can_double: false,
-                can_split: false,
-                can_surrender: false,
-                split_aces: false,
-            };
-            if target != canonical {
-                return Err(invalid(
-                    "insurance uses value 0, dealer ace, and no hand-action flags",
-                ));
-            }
             let up = game.take_value(11)?;
             let first = game.draw();
             let second = game.draw();
@@ -372,35 +356,9 @@ impl Game {
             game.phase = Phase::Insurance;
             return Ok(game);
         }
-        if target.can_surrender && (!target.can_double || target.split_aces) {
-            return Err(invalid(
-                "surrender requires an original two-card hand with doubling available",
-            ));
-        }
-        if target.can_split && target.kind != HandKind::Pair {
-            return Err(invalid("only a two-card pair may split"));
-        }
-        if target.split_aces
-            && (target.kind != HandKind::Pair
-                || target.value != 11
-                || target.can_double
-                || target.can_surrender)
-        {
-            return Err(invalid(
-                "only a pair of split aces has an actionable one-card-only decision",
-            ));
-        }
-        if target.kind == HandKind::Pair && !target.can_double && !target.split_aces {
-            return Err(invalid("an ordinary two-card pair always permits doubling"));
-        }
-        if target.kind == HandKind::Pair && !target.can_split && target.can_surrender {
-            return Err(invalid(
-                "an original pair cannot already have exhausted split capacity",
-            ));
-        }
-        let (values, length) = practice_values(target).ok_or(invalid(
-            "no playable card composition has this total and action availability",
-        ))?;
+        let Some((values, length)) = values else {
+            return Err(invalid("insurance has no player hand values"));
+        };
         let mut cards = Vec::with_capacity(length);
         for &value in &values[..length] {
             cards.push(game.take_value(value)?);
@@ -471,6 +429,49 @@ fn practice_values(target: Situation) -> Option<([u8; 3], usize)> {
         }
     }
     None
+}
+
+fn validate_practice_target(target: Situation) -> Result<Option<([u8; 3], usize)>, &'static str> {
+    if !(2..=11).contains(&target.dealer) {
+        return Err("dealer upcard must be 2 through ace");
+    }
+    if target.kind == HandKind::Insurance {
+        return (target.value == 0
+            && target.dealer == 11
+            && !target.can_double
+            && !target.can_split
+            && !target.can_surrender
+            && !target.split_aces)
+            .then_some(None)
+            .ok_or("insurance uses value 0, dealer ace, and no hand-action flags");
+    }
+    if target.can_surrender && (!target.can_double || target.split_aces) {
+        return Err("surrender requires an original two-card hand with doubling available");
+    }
+    if target.can_split && target.kind != HandKind::Pair {
+        return Err("only a two-card pair may split");
+    }
+    if target.split_aces
+        && (target.kind != HandKind::Pair
+            || target.value != 11
+            || target.can_double
+            || target.can_surrender)
+    {
+        return Err("only a pair of split aces has an actionable one-card-only decision");
+    }
+    if target.kind == HandKind::Pair && !target.can_double && !target.split_aces {
+        return Err("an ordinary two-card pair always permits doubling");
+    }
+    if target.kind == HandKind::Pair && !target.can_split && target.can_surrender {
+        return Err("an original pair cannot already have exhausted split capacity");
+    }
+    practice_values(target)
+        .map(Some)
+        .ok_or("no playable card composition has this total and action availability")
+}
+
+pub(crate) fn valid_practice_situation(target: Situation) -> bool {
+    validate_practice_target(target).is_ok()
 }
 
 #[cfg(test)]
