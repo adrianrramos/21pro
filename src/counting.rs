@@ -5,22 +5,30 @@ use thiserror::Error;
 
 use crate::model::{Card, Rank, Suit};
 
+/// Number of cards revealed by one card-counting trial.
 pub const TRIAL_SIZE: usize = 52;
 
+/// A completed correct card-counting trial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CountingRecord {
+    /// Unix completion timestamp in seconds.
     pub completed_at: i64,
+    /// Elapsed trial duration in milliseconds.
     pub duration_ms: u64,
 }
 
+/// Invalid state transition while revealing a counting trial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum TrialError {
+    /// The trial was started more than once.
     #[error("the trial has already started")]
     AlreadyStarted,
+    /// All 52 trial cards have already been revealed.
     #[error("the trial already has 52 revealed cards")]
     Complete,
 }
 
+/// A freshly shuffled six-deck shoe that reveals one card at a time.
 #[derive(Debug, Clone)]
 pub struct CountingTrial {
     shoe: Vec<Card>,
@@ -29,6 +37,7 @@ pub struct CountingTrial {
 }
 
 impl CountingTrial {
+    /// Creates a deterministic trial from a seed.
     pub fn new(seed: u64) -> Self {
         let mut shoe = Vec::with_capacity(6 * Suit::ALL.len() * Rank::ALL.len());
         for _ in 0..6 {
@@ -47,6 +56,7 @@ impl CountingTrial {
         }
     }
 
+    /// Reveals card one and starts the trial.
     pub fn start(&mut self) -> Result<Card, TrialError> {
         if !self.revealed.is_empty() {
             return Err(TrialError::AlreadyStarted);
@@ -54,6 +64,7 @@ impl CountingTrial {
         self.reveal_next()
     }
 
+    /// Reveals the next card, or starts the trial if it has not started.
     pub fn next_card(&mut self) -> Result<Card, TrialError> {
         if self.revealed.is_empty() {
             return self.start();
@@ -61,24 +72,24 @@ impl CountingTrial {
         self.reveal_next()
     }
 
+    /// Returns the most recently revealed card.
     pub fn current_card(&self) -> Option<Card> {
         self.revealed.last().copied()
     }
 
+    /// Returns the number of revealed cards.
     pub fn cards_seen(&self) -> usize {
         self.revealed.len()
     }
 
+    /// Returns whether all cards in the trial have been revealed.
     pub fn is_complete(&self) -> bool {
         self.cards_seen() == TRIAL_SIZE
     }
 
+    /// Returns the final Hi-Lo running count so far.
     pub fn actual_count(&self) -> i32 {
         self.running_count
-    }
-
-    pub fn revealed_cards(&self) -> &[Card] {
-        &self.revealed
     }
 
     fn reveal_next(&mut self) -> Result<Card, TrialError> {
@@ -92,6 +103,7 @@ impl CountingTrial {
     }
 }
 
+/// Returns the Hi-Lo value for a card rank.
 pub const fn card_value(rank: Rank) -> i8 {
     match rank {
         Rank::Two | Rank::Three | Rank::Four | Rank::Five | Rank::Six => 1,
@@ -100,53 +112,16 @@ pub const fn card_value(rank: Rank) -> i8 {
     }
 }
 
-pub fn count_cards(cards: &[Card]) -> i32 {
-    cards
-        .iter()
-        .map(|card| i32::from(card_value(card.rank)))
-        .sum()
-}
-
+/// Parses a signed whole-number answer after trimming whitespace.
 pub fn parse_submitted_count(input: &str) -> Option<i32> {
     input.trim().parse().ok()
 }
 
+/// Returns a copy sorted by shortest duration, then completion time.
 pub fn sorted_history(history: &[CountingRecord]) -> Vec<CountingRecord> {
     let mut sorted = history.to_vec();
     sorted.sort_by_key(|record| (record.duration_ms, record.completed_at));
     sorted
-}
-
-/// Format persisted completion timestamps as UTC so history is unambiguous offline.
-pub fn format_completed_at(timestamp: i64) -> String {
-    let days = timestamp.div_euclid(86_400);
-    let seconds = timestamp.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    let hour = seconds / 3_600;
-    let minute = seconds / 60 % 60;
-    let second = seconds % 60;
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
-}
-
-// Howard Hinnant's proleptic Gregorian civil-date conversion, using only the
-// standard library and supporting every non-negative Unix timestamp.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let shifted = days + 719_468;
-    let era = if shifted >= 0 {
-        shifted / 146_097
-    } else {
-        (shifted - 146_096) / 146_097
-    };
-    let day_of_era = shifted - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_part = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_part + 2) / 5 + 1;
-    let month = month_part + if month_part < 10 { 3 } else { -9 };
-    let year = year + i64::from(month <= 2);
-    (year, month as u32, day as u32)
 }
 
 #[cfg(test)]
@@ -185,7 +160,7 @@ mod tests {
         for suit in Suit::ALL {
             for rank in Rank::ALL {
                 let copies = trial
-                    .revealed_cards()
+                    .revealed
                     .iter()
                     .filter(|card| card.suit == suit && card.rank == rank)
                     .count();
@@ -202,29 +177,6 @@ mod tests {
         assert!(trial.current_card().is_some());
         assert_eq!(trial.cards_seen(), 1);
         assert!(matches!(trial.start(), Err(TrialError::AlreadyStarted)));
-    }
-
-    #[test]
-    fn fixed_cards_produce_the_expected_running_count() {
-        let cards = [
-            Card {
-                rank: Rank::Two,
-                suit: Suit::Clubs,
-            },
-            Card {
-                rank: Rank::Seven,
-                suit: Suit::Diamonds,
-            },
-            Card {
-                rank: Rank::King,
-                suit: Suit::Hearts,
-            },
-            Card {
-                rank: Rank::Six,
-                suit: Suit::Spades,
-            },
-        ];
-        assert_eq!(count_cards(&cards), 1);
     }
 
     #[test]
@@ -250,15 +202,6 @@ mod tests {
                 .map(|record| record.completed_at)
                 .collect::<Vec<_>>(),
             vec![10, 20, 30]
-        );
-    }
-
-    #[test]
-    fn timestamps_are_displayed_as_utc_dates() {
-        assert_eq!(format_completed_at(0), "1970-01-01 00:00:00 UTC");
-        assert_eq!(
-            format_completed_at(1_735_689_600),
-            "2025-01-01 00:00:00 UTC"
         );
     }
 }

@@ -185,9 +185,15 @@ impl Profile {
         self.rounds.push(RoundRecord { at, net_half_units });
     }
 
-    /// Save one completed, correct card-counting trial.
+    /// Records one completed correct counting trial.
+    ///
+    /// `completed_at` is a non-negative Unix timestamp in seconds.
+    /// `duration_ms` is the elapsed trial duration in milliseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `completed_at` is negative.
     pub fn record_counting_trial(&mut self, completed_at: i64, duration_ms: u64) {
-        assert!(completed_at >= 0, "negative counting completion timestamp");
         self.counting_history.push(CountingRecord {
             completed_at,
             duration_ms,

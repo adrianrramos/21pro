@@ -42,7 +42,12 @@ impl Feedback {
 struct CountingAssessment {
     submitted: i32,
     actual: i32,
-    correct: bool,
+}
+
+impl CountingAssessment {
+    fn correct(&self) -> bool {
+        self.submitted == self.actual
+    }
 }
 
 enum Command {
@@ -82,6 +87,7 @@ pub struct TrainerApp {
     counting_input: String,
     counting_input_error: Option<String>,
     counting_assessment: Option<CountingAssessment>,
+    // Sorted committed history; pending writes stay out until retry succeeds.
     counting_history: Vec<CountingRecord>,
     filter: Option<StudyMode>,
     analytics: Analytics,
@@ -167,6 +173,18 @@ impl TrainerApp {
             .unwrap_or_default()
     }
 
+    fn cache_counting_history(&mut self) {
+        while self.counting_history.len() < self.profile.counting_history.len() {
+            let record = self.profile.counting_history[self.counting_history.len()];
+            let key = (record.duration_ms, record.completed_at);
+            let position = self
+                .counting_history
+                .binary_search_by_key(&key, |cached| (cached.duration_ms, cached.completed_at))
+                .unwrap_or_else(|position| position);
+            self.counting_history.insert(position, record);
+        }
+    }
+
     fn reset_counting_trial(&mut self) {
         self.reset_counting_trial_with_seed(rand::random());
     }
@@ -195,18 +213,22 @@ impl TrainerApp {
         };
     }
 
-    fn persist_progress(&mut self) {
+    fn persist_progress(&mut self) -> bool {
         self.dirty = true;
         let Some(store) = &self.store else {
-            return;
+            return false;
         };
         match store.save(&self.profile) {
             Ok(()) => {
                 self.dirty = false;
                 self.error = None;
                 self.close_warning = false;
+                true
             }
-            Err(error) => self.error = Some(format!("Progress could not be saved: {error}")),
+            Err(error) => {
+                self.error = Some(format!("Progress could not be saved: {error}"));
+                false
+            }
         }
     }
 
@@ -250,7 +272,9 @@ impl TrainerApp {
 
     fn execute(&mut self, command: Command) {
         if matches!(command, Command::RetrySave) {
-            self.persist_progress();
+            if self.persist_progress() {
+                self.cache_counting_history();
+            }
             return;
         }
         if self.dirty || self.startup_error.is_some() {
@@ -367,16 +391,13 @@ impl TrainerApp {
                 let actual = trial.actual_count();
                 let correct = submitted == actual;
                 self.counting_input_error = None;
-                self.counting_assessment = Some(CountingAssessment {
-                    submitted,
-                    actual,
-                    correct,
-                });
+                self.counting_assessment = Some(CountingAssessment { submitted, actual });
                 if correct {
                     self.profile
                         .record_counting_trial(now(), elapsed.as_millis() as u64);
-                    self.counting_history = sorted_history(&self.profile.counting_history);
-                    self.persist_progress();
+                    if self.persist_progress() {
+                        self.cache_counting_history();
+                    }
                 }
             }
             Command::RetrySave => unreachable!(),
@@ -591,7 +612,7 @@ mod tests {
         app.counting_input = (actual + 1).to_string();
         app.execute(Command::SubmitCounting);
         assert!(
-            !app.counting_assessment.as_ref().unwrap().correct,
+            !app.counting_assessment.as_ref().unwrap().correct(),
             "the deliberately wrong answer must be assessed as incorrect"
         );
         assert!(app.profile.counting_history.is_empty());
@@ -604,7 +625,7 @@ mod tests {
         let elapsed = app.counting_elapsed.unwrap();
         app.counting_input = actual.to_string();
         app.execute(Command::SubmitCounting);
-        assert!(app.counting_assessment.as_ref().unwrap().correct);
+        assert!(app.counting_assessment.as_ref().unwrap().correct());
         assert_eq!(app.profile.counting_history.len(), 1);
         assert_eq!(
             app.profile.counting_history[0].duration_ms,
@@ -618,6 +639,38 @@ mod tests {
         let reopened = Store::open(&path).unwrap();
         assert_eq!(reopened.load().unwrap().counting_history.len(), 1);
     }
+    #[test]
+    fn failed_counting_save_stays_pending_until_retry() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("profile.redb");
+        let store = Store::open(&path).unwrap();
+        let mut app = test_app(store);
+        let actual = finish_counting_trial(&mut app, 42);
+        app.profile.schema_version += 1;
+        app.counting_input = actual.to_string();
+        app.execute(Command::SubmitCounting);
+
+        assert!(app.dirty);
+        assert!(app.counting_assessment.as_ref().unwrap().correct());
+        assert_eq!(app.profile.counting_history.len(), 1);
+        assert!(app.counting_history.is_empty());
+
+        app.profile.schema_version -= 1;
+        app.execute(Command::RetrySave);
+        assert!(!app.dirty);
+        assert_eq!(app.counting_history.len(), 1);
+        drop(app);
+        assert_eq!(
+            Store::open(&path)
+                .unwrap()
+                .load()
+                .unwrap()
+                .counting_history
+                .len(),
+            1
+        );
+    }
+
     fn spacebar_context() -> egui::Context {
         let context = egui::Context::default();
         let mut output = context.run_ui(

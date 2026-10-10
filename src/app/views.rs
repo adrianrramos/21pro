@@ -3,7 +3,7 @@ use std::time::Duration;
 use super::{Command, Page, TrainerApp, now, widgets as w};
 use eframe::egui::{self, RichText, Stroke, vec2};
 use twenty_one_pro::{
-    counting::{TRIAL_SIZE, format_completed_at},
+    counting::TRIAL_SIZE,
     game::Phase,
     model::{ASSESSMENT_ROUNDS, HandKind},
     strategy,
@@ -15,6 +15,37 @@ fn format_duration(duration: Duration) -> String {
     let minutes = total_seconds / 60;
     let seconds = total_seconds % 60;
     format!("{minutes:02}:{seconds:02}.{:03}", duration.subsec_millis())
+}
+/// Format persisted completion timestamps as UTC so history is unambiguous offline.
+fn format_completed_at(timestamp: i64) -> String {
+    let days = timestamp.div_euclid(86_400);
+    let seconds = timestamp.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds / 3_600;
+    let minute = seconds / 60 % 60;
+    let second = seconds % 60;
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
+}
+
+// Howard Hinnant's proleptic Gregorian civil-date conversion, using only the
+// standard library and supporting every non-negative Unix timestamp.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted / 146_097
+    } else {
+        (shifted - 146_096) / 146_097
+    };
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_part = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_part + 2) / 5 + 1;
+    let month = month_part + if month_part < 10 { 3 } else { -9 };
+    let year = year + i64::from(month <= 2);
+    (year, month as u32, day as u32)
 }
 
 impl TrainerApp {
@@ -517,10 +548,14 @@ impl TrainerApp {
                     *command = Some(Command::NextCounting);
                 }
             } else if let Some(assessment) = &self.counting_assessment {
-                let color = if assessment.correct { w::GREEN } else { w::RED };
+                let color = if assessment.correct() {
+                    w::GREEN
+                } else {
+                    w::RED
+                };
                 w::panel().stroke(Stroke::new(1.0, color)).show(ui, |ui| {
                     ui.label(
-                        RichText::new(if assessment.correct {
+                        RichText::new(if assessment.correct() {
                             "Correct"
                         } else {
                             "Incorrect"
@@ -531,8 +566,15 @@ impl TrainerApp {
                     );
                     ui.label(format!("Submitted count: {:+}", assessment.submitted));
                     ui.label(format!("Actual count: {:+}", assessment.actual));
-                    if assessment.correct {
-                        w::muted(ui, "This completed trial was saved.");
+                    if assessment.correct() {
+                        w::muted(
+                            ui,
+                            if self.dirty {
+                                "Correct trial is pending save. Retry saving before closing."
+                            } else {
+                                "This completed trial was saved."
+                            },
+                        );
                     } else {
                         w::muted(ui, "Incorrect trials are not saved.");
                     }
@@ -639,5 +681,19 @@ impl TrainerApp {
             if ui.button("Copy data path").clicked() { ui.ctx().copy_text(self.data_path.display().to_string()); }
             w::muted(ui, "Decisions, completed rounds, and review schedules are saved after every move. An unfinished hand is not resumed after closing. Close the app before copying the database as a backup. No telemetry or network service is used; source links open only when clicked.");
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timestamps_are_displayed_as_utc_dates() {
+        assert_eq!(format_completed_at(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(
+            format_completed_at(1_735_689_600),
+            "2025-01-01 00:00:00 UTC"
+        );
     }
 }
