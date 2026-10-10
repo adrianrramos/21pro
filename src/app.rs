@@ -387,11 +387,15 @@ impl TrainerApp {
                 Err(error) => self.error = Some(error.to_string()),
             },
             Command::PlayUndo => match self.play.undo_chip() {
-                Ok(()) => self.persist_progress(),
+                Ok(()) => {
+                    self.persist_progress();
+                }
                 Err(error) => self.error = Some(error.to_string()),
             },
             Command::PlayClear => match self.play.clear_wager() {
-                Ok(()) => self.persist_progress(),
+                Ok(()) => {
+                    self.persist_progress();
+                }
                 Err(error) => self.error = Some(error.to_string()),
             },
             Command::ResetPlay(bankroll) => match self.play.reset(bankroll, rand::random()) {
