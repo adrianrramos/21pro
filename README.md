@@ -289,7 +289,7 @@ Buttons expose the same actions. Illegal moves are disabled. Feedback stays visi
 
 ## Variance Visualizer
 
-Open **Variance Visualizer** directly from the sidebar; it is available on a fresh profile and does not require the 250-round baseline. Enter hourly EV, hourly standard deviation, starting bankroll, hours, and 1–9 simulated players, then run the model. Monetary values are dollars; SD is the dollar standard deviation of one hour. Inputs are bounded and validated, with at most two decimal places for monetary fields.
+Open **Simulator** directly from the sidebar; it is available on a fresh profile and does not require the 250-round baseline. Enter hourly EV, hourly standard deviation, starting bankroll, hours, and 1–9 simulated players, then run the model. Monetary values are dollars; SD is the dollar standard deviation of one hour. Inputs are bounded and validated, with at most two decimal places for monetary fields.
 
 The chart shows an unstopped analytical EV line and optional ±1/±2 SD reference bands alongside rounded, stopping player paths. EV grows linearly while accumulated SD grows with the square root of time. A depleted path keeps its signed crossing balance and then freezes. This is an educational Gaussian hourly model: it does not deal cards, resize bets, replenish bankroll, estimate risk of ruin, or predict profit. More players show different possible histories; they do not change the odds.
 

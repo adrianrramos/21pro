@@ -136,7 +136,7 @@ fn complete_personalized_practice_without_advancing_table_baseline() {
 #[test]
 fn variance_visualizer_runs_without_unlocking_training() {
     let mut harness = fixture(Fixture::TableReady);
-    click(&mut harness, "05   Variance Visualizer");
+    click(&mut harness, "05   Simulator");
     harness.get_by_label("Example inputs only. Enter hourly EV and standard deviation for the game and betting strategy you want to explore. These values are not calculated from your training results.");
     harness.get_by_label("Run simulation").click();
     harness.run();
