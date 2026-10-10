@@ -330,6 +330,13 @@ impl Game {
             Action::Insure | Action::DeclineInsurance => {
                 self.insured = action == Action::Insure;
                 self.phase = Phase::Playing;
+                if self.dealer_has_blackjack() {
+                    self.active = self.hands.len();
+                    self.settle();
+                } else {
+                    self.advance();
+                }
+                return Ok(());
             }
             Action::Hit => {
                 let card = self.draw();
@@ -387,8 +394,12 @@ impl Game {
         self.settle();
     }
 
+    fn dealer_has_blackjack(&self) -> bool {
+        self.dealer.len() == 2 && hand_value(&self.dealer).total == 21
+    }
+
     fn settle(&mut self) {
-        let dealer_blackjack = self.dealer.len() == 2 && hand_value(&self.dealer).total == 21;
+        let dealer_blackjack = self.dealer_has_blackjack();
         // No need to draw against only busts, surrenders, or a natural.
         if !dealer_blackjack
             && self
@@ -821,18 +832,35 @@ mod tests {
     }
 
     #[test]
-    fn no_look_double_refund_and_insurance_are_separate() {
-        let mut game = rig(&[5, 11, 6, 10, 10]);
-        game.act(Action::Insure).unwrap();
-        assert_eq!(game.phase, Phase::Playing);
-        assert!(game.situation().unwrap().can_double);
-        game.act(Action::Double).unwrap();
-        assert_eq!(game.hands[0].cards.len(), 3);
-        assert_eq!(game.hands[0].wager_half_units, 4);
-        let result = game.result.unwrap();
+    fn dealer_blackjack_settles_immediately_after_insurance() {
+        let mut insured = rig(&[5, 11, 6, 10, 10]);
+        insured.act(Action::Insure).unwrap();
+        assert_eq!(insured.phase, Phase::Finished);
+        insured.validate().unwrap();
+        assert!(insured.situation().is_none());
+        assert_eq!(
+            insured.act(Action::Double),
+            Err(GameError::NoActiveDecision)
+        );
+        let result = insured.result.unwrap();
         assert_eq!(result.net_half_units, 0);
         assert_eq!(result.outcomes[0].net_half_units, -2);
         assert_eq!(result.outcomes[1].net_half_units, 2);
+
+        let mut declined = rig(&[5, 11, 6, 10]);
+        declined.act(Action::DeclineInsurance).unwrap();
+        assert_eq!(declined.phase, Phase::Finished);
+        declined.validate().unwrap();
+        assert_eq!(declined.act(Action::Hit), Err(GameError::NoActiveDecision));
+        assert_eq!(net(&declined), -2);
+    }
+
+    #[test]
+    fn insurance_can_continue_when_dealer_has_no_blackjack() {
+        let mut game = rig(&[5, 11, 6, 9]);
+        game.act(Action::Insure).unwrap();
+        assert_eq!(game.phase, Phase::Playing);
+        assert!(game.situation().is_some());
     }
 
     #[test]
@@ -851,12 +879,19 @@ mod tests {
 
     #[test]
     fn late_surrender_is_conditional_and_never_after_hit_or_split() {
-        for (hole, expected) in [(10, -2), (9, -1)] {
-            let mut game = rig(&[10, 11, 6, hole]);
-            game.act(Action::DeclineInsurance).unwrap();
-            game.act(Action::Surrender).unwrap();
-            assert_eq!(net(&game), expected);
-        }
+        let mut dealer_blackjack = rig(&[10, 11, 6, 10]);
+        dealer_blackjack.act(Action::DeclineInsurance).unwrap();
+        assert_eq!(dealer_blackjack.phase, Phase::Finished);
+        assert_eq!(net(&dealer_blackjack), -2);
+        assert_eq!(
+            dealer_blackjack.act(Action::Surrender),
+            Err(GameError::NoActiveDecision)
+        );
+
+        let mut surrender = rig(&[10, 11, 6, 9]);
+        surrender.act(Action::DeclineInsurance).unwrap();
+        surrender.act(Action::Surrender).unwrap();
+        assert_eq!(net(&surrender), -1);
         let mut hit = rig(&[2, 10, 3, 8, 2]);
         hit.act(Action::Hit).unwrap();
         assert!(!hit.situation().unwrap().can_surrender);
@@ -988,14 +1023,16 @@ mod tests {
     }
 
     #[test]
-    fn hole_card_never_changes_legal_actions() {
+    fn hole_card_is_checked_after_insurance_decision() {
         let mut natural = rig(&[8, 11, 8, 10]);
         let mut other = rig(&[8, 11, 8, 9]);
         assert_eq!(natural.situation(), other.situation());
         natural.act(Action::DeclineInsurance).unwrap();
         other.act(Action::DeclineInsurance).unwrap();
-        assert_eq!(natural.situation(), other.situation());
-        assert_eq!(natural.phase, Phase::Playing);
+        assert_eq!(natural.phase, Phase::Finished);
+        assert_eq!(other.phase, Phase::Playing);
+        assert!(natural.situation().is_none());
+        assert!(other.situation().is_some());
     }
 
     #[test]

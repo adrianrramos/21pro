@@ -529,7 +529,7 @@ pub fn money(cents: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::{Game, HandStatus, PlayerHand};
+    use crate::game::{Game, GameError, HandStatus, PlayerHand};
     use crate::model::Action;
 
     fn game_with_cards(player: &[u8], dealer: &[u8]) -> Game {
@@ -615,16 +615,32 @@ mod tests {
     }
 
     #[test]
+    fn dealer_blackjack_insurance_settles_play_session_immediately() {
+        let mut session = prepared_session(&[10, 6], &[11, 10]);
+        session.game.phase = Phase::Insurance;
+        session.act(Action::Insure).unwrap();
+        assert_eq!(session.phase(), Phase::Finished);
+        session.validate().unwrap();
+        assert_eq!(session.available_cents, 100_000);
+        assert_eq!(session.committed_cents, 0);
+        assert_eq!(session.cumulative_net_cents(), 0);
+        assert_eq!(
+            session.act(Action::Stand),
+            Err(PlayError::Game(GameError::NoActiveDecision))
+        );
+    }
+
+    #[test]
     fn insurance_and_split_stakes_are_reserved_and_settled_once() {
-        let mut insured = prepared_session(&[10, 6], &[11, 10]);
+        let mut insured = prepared_session(&[10, 6], &[11, 9]);
         insured.game.phase = Phase::Insurance;
         insured.act(Action::Insure).unwrap();
         assert_eq!(insured.committed_cents, 750);
         assert_eq!(insured.available_cents, 99_250);
         insured.act(Action::Stand).unwrap();
-        assert_eq!(insured.available_cents, 100_000);
+        assert_eq!(insured.available_cents, 99_250);
         assert_eq!(insured.committed_cents, 0);
-        assert_eq!(insured.cumulative_net_cents(), 0);
+        assert_eq!(insured.cumulative_net_cents(), -750);
 
         let mut split = prepared_session(&[8, 8], &[10, 6]);
         split.act(Action::Split).unwrap();
