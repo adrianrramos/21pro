@@ -1,11 +1,12 @@
 use std::time::Duration;
 
 use super::{Command, Page, TrainerApp, now, widgets as w};
-use eframe::egui::{self, RichText, Stroke, vec2};
+use eframe::egui::{self, Align2, FontId, RichText, Sense, Stroke, pos2, vec2};
 use twenty_one_pro::{
     counting::TRIAL_SIZE,
     game::Phase,
-    model::{ASSESSMENT_ROUNDS, HandKind},
+    model::{ASSESSMENT_ROUNDS, Action, HandKind},
+    play::{self, CHIP_DENOMINATIONS},
     strategy,
     training::StudyMode,
 };
@@ -67,7 +68,8 @@ impl TrainerApp {
                     (Page::Insights, "02", "Your insights"),
                     (Page::Practice, "03", "Practice"),
                     (Page::Counting, "04", "Card counting"),
-                    (Page::Rules, "05", "Rules"),
+                    (Page::Play, "05", "Play"),
+                    (Page::Rules, "06", "Rules"),
                 ] {
                     let selected = self.page == page;
                     let label = format!("{number}   {title}");
@@ -630,6 +632,343 @@ impl TrainerApp {
         });
     }
 
+    pub(super) fn play_view(&mut self, ui: &mut egui::Ui, command: &mut Option<Command>) {
+        w::heading(
+            ui,
+            "Free Play",
+            "Simulated bankroll, exact stakes, and a continuous six-deck shoe.",
+        );
+        ui.columns(5, |columns| {
+            w::metric(
+                &mut columns[0],
+                "AVAILABLE FUNDS",
+                &play::money(self.play.available_cents),
+                "Not committed",
+            );
+            w::metric(
+                &mut columns[1],
+                "COMMITTED STAKES",
+                &play::money(self.play.committed_cents),
+                "Reserved in this round",
+            );
+            w::metric(
+                &mut columns[2],
+                "CURRENT BET",
+                &play::money(self.play.current_wager_cents()),
+                "Base wager",
+            );
+            w::metric(
+                &mut columns[3],
+                "SESSION NET P/L",
+                &play::money(self.play.cumulative_net_cents()),
+                "Settled rounds only",
+            );
+            w::metric(
+                &mut columns[4],
+                "CARDS REMAINING",
+                &self.play.remaining_cards().to_string(),
+                "Shuffle at 68",
+            );
+        });
+        ui.add_space(14.0);
+        let narrow = ui.available_width() < 820.0;
+        if narrow {
+            w::game_table(ui, &self.play.game);
+            self.play_controls(ui, command);
+            self.play_chart(ui);
+        } else {
+            ui.columns(2, |columns| {
+                w::game_table(&mut columns[0], &self.play.game);
+                self.play_controls(&mut columns[0], command);
+                self.play_chart(&mut columns[1]);
+            });
+        }
+        ui.add_space(14.0);
+        if ui.button("Reset session / new bankroll").clicked() {
+            self.reset_confirming = true;
+            self.reset_input_error = None;
+            if self.reset_input.is_empty() {
+                self.reset_input = "1000.00".to_owned();
+            }
+        }
+        w::muted(
+            ui,
+            "Reset abandons an unfinished round without recording a result. Training and card-counting progress are separate.",
+        );
+        if self.reset_confirming {
+            egui::Window::new("Reset Free Play session")
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label("Enter a positive bankroll in dollars, then confirm.");
+                    let response = ui.text_edit_singleline(&mut self.reset_input);
+                    if response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    {
+                        match play::parse_money_cents(&self.reset_input) {
+                            Ok(cents) => *command = Some(Command::ResetPlay(cents)),
+                            Err(error) => self.reset_input_error = Some(error.to_string()),
+                        }
+                    }
+                    if let Some(error) = &self.reset_input_error {
+                        ui.colored_label(w::RED, error);
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.reset_confirming = false;
+                            self.reset_input_error = None;
+                        }
+                        if w::primary(ui, "Confirm reset").clicked() {
+                            match play::parse_money_cents(&self.reset_input) {
+                                Ok(cents) => *command = Some(Command::ResetPlay(cents)),
+                                Err(error) => self.reset_input_error = Some(error.to_string()),
+                            }
+                        }
+                    });
+                });
+        }
+    }
+    fn play_controls(&mut self, ui: &mut egui::Ui, command: &mut Option<Command>) {
+        w::panel().show(ui, |ui| {
+            ui.label(RichText::new("Build your base wager").size(20.0).strong());
+            ui.label(format!(
+                "Pending wager: {} · locked wager: {}",
+                play::money(self.play.pending_wager_cents),
+                self.play
+                    .locked_wager_cents
+                    .map_or("none".to_owned(), play::money)
+            ));
+            if matches!(self.play.phase(), Phase::Ready | Phase::Finished) {
+                if self.play.phase() == Phase::Finished
+                    && let Some(result) = &self.play.game.result
+                {
+                    for outcome in &result.outcomes {
+                        ui.label(format!(
+                            "{} · {}",
+                            outcome.label,
+                            play::money(
+                                i64::from(outcome.net_half_units) * self.play.current_wager_cents()
+                                    / 2,
+                            ),
+                        ));
+                    }
+                }
+                ui.horizontal_wrapped(|ui| {
+                    for (label, cents, color) in [
+                        (
+                            "Red",
+                            CHIP_DENOMINATIONS[0],
+                            egui::Color32::from_rgb(180, 60, 60),
+                        ),
+                        (
+                            "Green",
+                            CHIP_DENOMINATIONS[1],
+                            egui::Color32::from_rgb(48, 140, 84),
+                        ),
+                        (
+                            "Black",
+                            CHIP_DENOMINATIONS[2],
+                            egui::Color32::from_rgb(35, 35, 40),
+                        ),
+                        (
+                            "Yellow",
+                            CHIP_DENOMINATIONS[3],
+                            egui::Color32::from_rgb(190, 160, 30),
+                        ),
+                    ] {
+                        let button = egui::Button::new(
+                            RichText::new(format!("{label} {}", play::money(cents)))
+                                .color(egui::Color32::WHITE)
+                                .strong(),
+                        )
+                        .fill(color)
+                        .min_size(vec2(122.0, 40.0))
+                        .corner_radius(20);
+                        if ui
+                            .add_enabled(
+                                cents <= self.play.available_cents - self.play.pending_wager_cents,
+                                button,
+                            )
+                            .on_hover_text(format!(
+                                "{label} chip, denomination {}",
+                                play::money(cents)
+                            ))
+                            .clicked()
+                        {
+                            *command = Some(Command::PlayChip(cents));
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !self.play.wager_chips.is_empty(),
+                            egui::Button::new("Undo chip"),
+                        )
+                        .clicked()
+                    {
+                        *command = Some(Command::PlayUndo);
+                    }
+                    if ui
+                        .add_enabled(
+                            self.play.pending_wager_cents > 0,
+                            egui::Button::new("Clear wager"),
+                        )
+                        .clicked()
+                    {
+                        *command = Some(Command::PlayClear);
+                    }
+                });
+                let can_deal = self.play.pending_wager_cents >= play::MINIMUM_WAGER_CENTS
+                    && self.play.pending_wager_cents <= self.play.available_cents;
+                if ui
+                    .add_enabled(
+                        can_deal,
+                        egui::Button::new(if self.play.phase() == Phase::Finished {
+                            "Deal next hand  [Enter]"
+                        } else {
+                            "Deal  [Enter]"
+                        })
+                        .min_size(vec2(150.0, 42.0)),
+                    )
+                    .clicked()
+                {
+                    *command = Some(Command::PlayDeal);
+                }
+                if !can_deal {
+                    w::muted(
+                        ui,
+                        if self.play.available_cents < play::MINIMUM_WAGER_CENTS {
+                            "Available funds are below $5. Reset to choose a new bankroll."
+                        } else {
+                            "Add chips totaling at least $5 before dealing."
+                        },
+                    );
+                }
+            } else if let Some(situation) = self.play.game.situation() {
+                ui.label(RichText::new("Choose an action").size(20.0).strong());
+                ui.horizontal_wrapped(|ui| {
+                    for action in Action::ALL {
+                        let insurance = matches!(action, Action::Insure | Action::DeclineInsurance);
+                        if insurance
+                            != (situation.kind == twenty_one_pro::model::HandKind::Insurance)
+                        {
+                            continue;
+                        }
+                        let legal = situation.allows(action);
+                        let affordable = self.play.can_afford(action);
+                        let label = format!("{}  [{}]", action.label(), action.short());
+                        if ui
+                            .add_enabled(
+                                legal && affordable,
+                                egui::Button::new(label).min_size(vec2(112.0, 40.0)),
+                            )
+                            .on_hover_text(if legal && affordable {
+                                action.label().to_owned()
+                            } else if legal {
+                                "Not enough available funds for this additional stake.".to_owned()
+                            } else {
+                                "Illegal in this hand.".to_owned()
+                            })
+                            .clicked()
+                        {
+                            *command = Some(Command::PlayAct(action));
+                        }
+                    }
+                });
+                w::muted(ui, situation.context());
+                if self.play.phase() == Phase::Insurance {
+                    w::muted(
+                        ui,
+                        "Insurance is half the base wager and settles independently.",
+                    );
+                }
+            }
+        });
+    }
+
+    fn play_chart(&self, ui: &mut egui::Ui) {
+        w::panel().show(ui, |ui| {
+            ui.label(RichText::new("Session P/L").size(20.0).strong());
+            ui.label("Cumulative settled dollars relative to the starting bankroll.");
+            let history = &self.play.history;
+            let values: Vec<f32> = history
+                .iter()
+                .map(|point| point.cumulative_net_cents as f32 / 100.0)
+                .collect();
+            let min = values.iter().copied().fold(0.0, f32::min);
+            let max = values.iter().copied().fold(0.0, f32::max);
+            let padding = ((max - min) * 0.12).max(1.0);
+            let low = min - padding;
+            let high = max + padding;
+            let (rect, _) =
+                ui.allocate_exact_size(vec2(ui.available_width(), 220.0), Sense::hover());
+            let plot =
+                egui::Rect::from_min_max(rect.min + vec2(48.0, 14.0), rect.max - vec2(14.0, 34.0));
+            let painter = ui.painter();
+            let zero_y = plot.bottom() - ((0.0 - low) / (high - low)) * plot.height();
+            painter.line_segment(
+                [pos2(plot.left(), zero_y), pos2(plot.right(), zero_y)],
+                Stroke::new(1.0, w::GOLD),
+            );
+            let denominator = history.len().saturating_sub(1).max(1) as f32;
+            let mut previous = None;
+            for (index, point) in history.iter().enumerate() {
+                let value = point.cumulative_net_cents as f32 / 100.0;
+                let position = pos2(
+                    plot.left() + index as f32 / denominator * plot.width(),
+                    plot.bottom() - ((value - low) / (high - low)) * plot.height(),
+                );
+                if let Some(previous) = previous {
+                    painter.line_segment([previous, position], Stroke::new(2.0, w::GREEN));
+                }
+                painter.circle_filled(position, 4.0, w::GREEN);
+                ui.interact(
+                    egui::Rect::from_center_size(position, egui::Vec2::splat(18.0)),
+                    ui.id().with(("free-play-point", index)),
+                    Sense::hover(),
+                )
+                .on_hover_text(format!(
+                    "Round {} · bankroll {} · cumulative P/L {}",
+                    point.round,
+                    play::money(point.bankroll_cents),
+                    play::money(point.cumulative_net_cents)
+                ));
+                previous = Some(position);
+            }
+            painter.text(
+                pos2(plot.left() - 8.0, zero_y),
+                Align2::RIGHT_CENTER,
+                "$0",
+                FontId::proportional(10.0),
+                w::MUTED,
+            );
+            painter.text(
+                pos2(plot.center().x, rect.bottom() - 8.0),
+                Align2::CENTER_BOTTOM,
+                "Completed rounds / hands played",
+                FontId::proportional(11.0),
+                w::MUTED,
+            );
+            ui.label(RichText::new("Numeric session history").strong());
+            egui::Grid::new("free-play-history")
+                .num_columns(3)
+                .spacing(vec2(16.0, 5.0))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Round").color(w::MUTED));
+                    ui.label(RichText::new("Bankroll").color(w::MUTED));
+                    ui.label(RichText::new("Cumulative P/L").color(w::MUTED));
+                    ui.end_row();
+                    for point in history {
+                        ui.label(point.round.to_string());
+                        ui.label(play::money(point.bankroll_cents));
+                        ui.label(play::money(point.cumulative_net_cents));
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+
     pub(super) fn rules_view(&self, ui: &mut egui::Ui) {
         w::heading(
             ui,
@@ -679,7 +1018,7 @@ impl TrainerApp {
             ui.label(RichText::new("Your data stays here").strong());
             ui.label(self.data_path.display().to_string());
             if ui.button("Copy data path").clicked() { ui.ctx().copy_text(self.data_path.display().to_string()); }
-            w::muted(ui, "Decisions, completed rounds, and review schedules are saved after every move. An unfinished hand is not resumed after closing. Close the app before copying the database as a backup. No telemetry or network service is used; source links open only when clicked.");
+            w::muted(ui, "Decisions, completed rounds, review schedules, and the complete current Free Play session are saved after every accepted change. Close the app before copying the database as a backup. No telemetry or network service is used; source links open only when clicked.");
         });
     }
 }

@@ -2,6 +2,7 @@
 pub mod counting;
 pub mod game;
 pub mod model;
+pub mod play;
 pub mod storage;
 pub mod strategy;
 pub mod training;

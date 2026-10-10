@@ -173,7 +173,8 @@ References: [Microsoft WSL GUI support](https://learn.microsoft.com/en-us/window
 3. **Your insights:** the assessment opens automatically at the threshold. It includes accuracy trends, mistakes by hand family, and separate hard-total, soft-total, and pair heatmaps. Table play and focused practice can be viewed separately or together.
 4. **Focused practice:** generate a 12-hand plan from due reviews and weak observed situations, or drill a specific heatmap situation. Practice uses the same engine, and hands continue after the targeted decision. If fewer than 12 distinct situations are known, the plan uses the available ones.
 5. **Card counting:** open the Card counting tab for a 52-card Hi-Lo trial from a freshly shuffled six-deck shoe. The final running count is checked after timing stops; only correct trials are saved, with the fastest history first.
-6. **Repeat over time:** mistakes enter a local spaced-repetition schedule. Due correct answers earn longer intervals; errors return sooner. History and due dates survive closing the app.
+6. **Free Play:** open Play without completing the training baseline. Choose a simulated bankroll, build a wager with red $5, green $25, black $100, or yellow $1,000 chips, and play the same fixed six-deck rules. The adjacent session graph records one settled point per original round.
+7. **Repeat over time:** mistakes enter a local spaced-repetition schedule. Due correct answers earn longer intervals; errors return sooner. History, due dates, counting trials, and the current Free Play shoe/session survive closing the app.
 
 ### Controls
 
@@ -247,9 +248,9 @@ On macOS, the database is:
 ~/Library/Application Support/dev.TwentyOnePro.21Pro/profile.redb
 ```
 
-The Rules screen shows the exact path on every platform. Close the app before copying that file as a backup. A single versioned JSON profile is committed transactionally inside a `redb` database. A locked, corrupt, wrong-ruleset, or unsupported-version profile produces an explicit error; the app does not silently replace it with empty progress.
+The Rules screen shows the exact path on every platform. Close the app before copying that file as a backup. A single versioned JSON profile and the current versioned Free Play session are committed transactionally inside a `redb` database. A locked, corrupt, wrong-ruleset, or unsupported-version profile or Free Play snapshot produces an explicit error; the app does not silently replace it with empty progress.
 
-Decisions, completed rounds, review schedules, and correct card-counting trials are saved locally. An **unfinished hand or counting trial is not resumed** after closing; already recorded decisions remain saved, but incomplete work and incorrect counting answers are not saved. If a write fails, play pauses, a retry is offered, and closing warns about unsaved changes.
+Decisions, completed rounds, review schedules, and correct card-counting trials are saved locally. Free Play saves its starting bankroll, exact cents accounting, graph history, undealt shoe order, dealer/player cards, active phase, split/insurance state, and unfinished round after every accepted change, so closing and reopening resumes the same session without redealing or duplicate settlement. If a write fails, play pauses, a retry is offered, and closing warns about unsaved changes.
 
 For an isolated development profile:
 
