@@ -6,6 +6,8 @@ All application code—including the UI, blackjack engine, analytics, scheduler,
 
 Playing-card faces and backs use bundled SVG artwork exported from the full [CardMeister](https://cardmeister.github.io/index.html?full) set. The assets are rendered natively with egui's SVG loader and cached by egui; the app does not use a webview or fetch artwork at runtime. See [`assets/cards/README.md`](assets/cards/README.md) for the upstream revision and Unlicense provenance.
 
+Project terminology: [Glossary](GLOSSARY.md) · [Technical companion](#component-vocabulary).
+
 ## Run on your Mac
 
 Requirements: macOS 12 or newer, Xcode Command Line Tools, and Rust **1.95 or newer**. Both Apple Silicon and Intel Macs use the same source.
@@ -189,6 +191,31 @@ This is one Cargo package with a library and a desktop binary. The library expos
 | `src/main.rs` | Native application entry point, configuration | How the window and `TrainerApp` are created |
 
 `Analytics::trend` reuses `CellStats` for nonempty blocks of up to 25 decisions; the renderer gets block numbers from their positions. Analytics and the UI use `Option<StudyMode>`: `Some(mode)` selects one mode and `None` selects both. The controller owns table/practice identity, while card-counting history is stored separately and never contributes to blackjack learning analytics. The saved profile remains backward-compatible because older snapshots default the new history to empty.
+
+### Component vocabulary
+
+Technical companion to the [project glossary](GLOSSARY.md), keeping implementation names separate from user-facing vocabulary.
+
+**Blackjack engine**:
+The shared mechanics component responsible for dealing, hand progression, legal actions, and settlement. Both table play and focused practice use it; see [`src/game.rs`](src/game.rs).
+
+**Strategy evaluator**:
+The component that supplies the recommended action and explanation for a situation. It evaluates decisions independently of their eventual outcome; see [`src/strategy.rs`](src/strategy.rs).
+
+**Learning system**:
+The components that record attempts, calculate performance statistics, prioritize situations, and maintain review schedules; see [`src/training.rs`](src/training.rs). The current scheduler is SM-2-style, not an Anki integration or FSRS implementation.
+
+**Card-counting engine**:
+The component that reveals a bounded sequence of cards from a shuffled six-deck shoe and evaluates the final Hi-Lo running count. It is separate from blackjack decision scoring; see [`src/counting.rs`](src/counting.rs).
+
+**Desktop interface — eframe / egui**:
+The native windowing and interface layer through which the learner interacts with the application. It presents state and dispatches commands rather than implementing a second set of blackjack rules; see [`src/app.rs`](src/app.rs).
+
+**Progress store — redb / Serde**:
+The persistence layer that saves and restores the player profile locally. The current implementation stores a versioned JSON profile transactionally inside a `redb` database; see [`src/storage.rs`](src/storage.rs).
+
+**Card artwork — CardMeister**:
+The source of the bundled playing-card faces and backs. These assets are rendered locally; CardMeister is not an embedded website or game engine, and its provenance is recorded in [`assets/cards/README.md`](assets/cards/README.md).
 
 ### A concrete decision to follow
 
