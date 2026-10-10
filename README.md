@@ -42,7 +42,7 @@ The same native app also runs on Linux with an X11 display, a C linker, and Open
 
 #### Unattended native visual verification (recommended)
 
-Use **Xvfb + Mesa software OpenGL** for routine agent runs over SSH. It runs the actual native app on a private virtual X11 display, without a Windows desktop login or WSLg. The Linux host/WSL distribution must still be running and reachable. Reserve WSLg for occasional Windows desktop-integration checks.
+Use **Xvfb + Mesa software OpenGL** for agent runs over SSH. It runs the actual native app on a private virtual X11 display, without a Windows desktop login or WSLg. The Linux host/WSL distribution must still be running and reachable. WSLg verification is deferred; it is not a prerequisite or acceptance gate for this workflow.
 
 Once per Debian/Ubuntu host, install these in addition to the Linux dependencies above:
 
@@ -58,16 +58,17 @@ From an isolated development worktree:
 ./scripts/screenshot.sh target/visual/review.png
 ```
 
-The script builds with `dev-screenshot`, uses a fresh disposable profile even if `TWENTY_ONE_PRO_DATA_DIR` was already set, and writes `target/visual/table.png` by default. It fixes X11 scaling to 1 on a 1280×1024 virtual display, captures the app's 1180×860 initial window, then exits and removes the temporary profile/display. It overwrites the selected output only after a new capture succeeds. Generated images stay under the ignored `target/` directory when using the examples above.
+The script builds with `dev-screenshot`, uses a fresh disposable profile even if `TWENTY_ONE_PRO_DATA_DIR` was already set, and writes `target/visual/table.png` by default. It fixes X11 scaling to 1 on a 1280×1024 virtual display, captures the app's 1180×860 initial window, then exits and removes the temporary profile/display. It overwrites the selected output only after a new capture succeeds. A second argument selects a deterministic fixture and also enables `dev-fixtures`; without it, an inherited `TWENTY_ONE_PRO_FIXTURE` is cleared. Generated images stay under the ignored `target/` directory when using the examples above.
 
-**Inspect the image before claiming visual success.** This is a real-render smoke command, not a pixel-baseline test or a full interaction test. It captures the initial table; later hands remain random. Software-rendered Linux pixels do not prove Windows/macOS desktop integration or GPU performance.
+**Inspect the image before claiming visual success.** This is a real-render smoke command, not a pixel-baseline test or a full interaction test. Without a fixture it captures the initial table and later hands remain random. Software-rendered Linux pixels do not prove Windows/macOS desktop integration or GPU performance.
 
-Development features are opt-in; normal builds enable neither:
+Development features are opt-in; normal builds enable none:
 
 | Cargo feature | Runtime control | Purpose |
 | --- | --- | --- |
 | `dev-screenshot` | `EFRAME_SCREENSHOT_TO=/absolute/path.png` | eframe's Glow startup capture, then exit; the script sets this automatically |
 | `dev-inspection` | `EGUI_INSPECTION=127.0.0.1:5719` | Live accessibility tree, input injection, resize, and PNG capture |
+| `dev-fixtures` | `TWENTY_ONE_PRO_FIXTURE=<name>` | Repeatable scenes with a fixed clock, game seeds, and disposable data |
 
 For a long-running headless inspection session, run this from the worktree and stop with Ctrl+C when finished:
 
@@ -77,7 +78,7 @@ For a long-running headless inspection session, run this from the worktree and s
     trap 'rm -rf -- "$sandbox"' EXIT
     env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u EFRAME_SCREENSHOT_TO \
         LIBGL_ALWAYS_SOFTWARE=1 WINIT_X11_SCALE_FACTOR=1 \
-        XDG_RUNTIME_DIR="$sandbox" TWENTY_ONE_PRO_DATA_DIR="$sandbox/profile" \
+        TMPDIR="$sandbox" XDG_RUNTIME_DIR="$sandbox" TWENTY_ONE_PRO_DATA_DIR="$sandbox/profile" \
         EGUI_INSPECTION=127.0.0.1:5719 \
         xvfb-run -a -s '-screen 0 1280x1024x24 -dpi 96 -nolisten tcp' \
         cargo run --locked --features dev-inspection
@@ -86,7 +87,7 @@ For a long-running headless inspection session, run this from the worktree and s
 
 Inspection has **no authentication** and grants control of the app. Keep the endpoint on loopback, use a different port for each concurrent worktree, and use an SSH tunnel if the client runs elsewhere. The feature does not open an endpoint when `EGUI_INSPECTION` is unset or `0`. The screenshot script explicitly disables inspection.
 
-Headless verification exercised Mesa `llvmpipe` with unusable inherited display settings: initial screenshot, live inspection tree, Enter input, and a screenshot of the dealt hand. The 30 existing tests also passed with both development features enabled. Deterministic fixture/baseline coverage remains separate.
+Headless verification exercised Mesa `llvmpipe` with unusable inherited display settings: initial screenshot, live inspection tree, Enter input, and a screenshot of the dealt hand.
 
 #### Agent control through MCP
 
@@ -125,7 +126,101 @@ Verification used omp's actual project discovery and `/mcp test egui`, then the 
 
 Server documentation: [`egui_mcp` 0.2.0](https://docs.rs/crate/egui_mcp/0.2.0).
 
-#### WSLg development over SSH
+#### Deterministic visual fixtures
+
+Capture any of these scenes without playing through a personal profile:
+
+| Fixture | Starting state |
+| --- | --- |
+| `table-ready` | Empty history and a seeded shoe, ready to deal |
+| `table-opening` | Hard 16 against dealer 10, with the hole card hidden |
+| `table-feedback` | That same hand after standing: settlement and strategy correction |
+| `insights` | 250 simulated table rounds with mixed correct decisions and mistakes |
+| `practice` | First hand of a 12-hand plan derived from that history |
+| `rules` | Rules page with the completed sample baseline |
+
+```sh
+./scripts/screenshot.sh target/visual/table-opening.png table-opening
+./scripts/screenshot.sh target/visual/insights.png insights
+
+# Capture every scene:
+for fixture in table-ready table-opening table-feedback insights practice rules; do
+    ./scripts/screenshot.sh "target/visual/$fixture.png" "$fixture"
+done
+```
+
+For interactive MCP inspection, use the long-running headless command above with
+`TWENTY_ONE_PRO_FIXTURE=practice` added to `env` and
+`--features dev-inspection,dev-fixtures` on `cargo run`. The clock remains fixed
+at Unix time `1800000000`; subsequent deals and practice hands follow seeded
+sequences. The app uses its normal engine, learning logic, and real redb saves.
+Each fixture run creates its own temporary database and **never opens the normal
+data path**, including `TWENTY_ONE_PRO_DATA_DIR`. The sidebar marks fixture runs;
+the Rules page uses a stable temporary-profile label instead of a random path.
+Unknown names, including an empty name, fail startup rather than falling back to
+personal data. Setting the selector without `dev-fixtures` also fails startup.
+With no selector, even a feature-enabled build behaves normally.
+
+A normal app close drops the fixture directory. The shell examples also place
+temporary files inside the shell-owned sandbox: this matters because eframe's
+startup screenshot exits without running Rust destructors, and killing an
+interactive app can do the same.
+
+Verification captured all six scenes twice in separate processes: each pair was
+byte-identical at 1180×860 and left no temporary files behind. A direct native run
+with a deliberately unreadable personal-profile sentinel still rendered the
+fixture without touching that file; an unknown fixture failed without a capture.
+This establishes repeatability on the verified Linux/Mesa setup, not portable
+pixel equality across fonts, renderers, architectures, or dependency upgrades.
+Images remain review artifacts under `target/visual/`; no golden images or pixel
+comparison tolerances are committed.
+
+#### User workflow tests with egui_kittest
+
+[`egui_kittest` 0.36.2](https://docs.rs/egui_kittest/0.36.2/egui_kittest/)
+is a development-only dependency, matched to the app's egui/eframe version.
+Run the workflow suite directly, or as part of ordinary `cargo test`:
+
+```sh
+cargo test --locked --bin twenty-one-pro app::workflow_tests
+```
+
+No `DISPLAY`, WSLg, Xvfb, MCP server, or GPU is needed for these tests. They use
+`Harness::builder().build_eframe(...)` with the real `TrainerApp`, its normal widget tree,
+pointer/keyboard events, and AccessKit queries at 1180×860. Only user input is
+simulated; game rules, strategy feedback, scheduling, and redb saves are real.
+Each test owns a disposable fixture profile with fixed wall-clock timestamps and
+seeded table/practice hands, without changing process-wide environment variables.
+The counting workflow checks shuffle-independent boundaries and steps frames
+explicitly while its live timer runs. Fixtures compile automatically under
+`cfg(test)`; passing `--features dev-fixtures` is not required.
+
+`src/app/workflow_tests.rs` covers:
+
+- Deal, stand by keyboard, see correction and a completed round, then use Enter
+  to deal a natural that settles and counts without another decision.
+- Ignore a disabled Split button and shortcut, then accept and score a legal
+  surrender with the correct half-unit result.
+- Keep both insights and practice locked at 249 rounds; dealing alone does not
+  unlock them. Settling round 250 opens the assessment and focused practice.
+- Start and finish a 12-hand personalized plan, report its decision count, and
+  return to the table without increasing the table-round baseline.
+- Start a counting trial, advance all 52 cards by button and keyboard, validate
+  empty input, reject an impossible count, and restart without advancing the
+  table baseline or unlocking the assessment.
+
+Integration verification passed all five workflows and the full default and
+all-feature test suites with display variables unset, including existing
+counting-history persistence and older-profile migration coverage. Native
+Xvfb/MCP smoke separately exercised table correction followed by a natural,
+a complete 52-card counting trial, invalid input, incorrect-count feedback,
+and restarting the trial while preserving the table-round baseline.
+
+These are behavior tests, not image comparisons or proof of native platform
+integration. Screenshot rendering remains the separate fixture/MCP workflow
+above; no `wgpu`/`snapshot` features, golden PNGs, or `kittest.toml` are needed.
+
+#### WSLg development over SSH (deferred)
 
 WSLg needs a working Windows desktop connection as well as an X11 socket. On this host, starting WSL from SSH without a signed-in Windows desktop left WSLg's `msrdc.exe` in noninteractive Session 0. X11 connections timed out and Weston repeatedly exited with signal 11. Restarting WSL from the signed-in desktop moved `msrdc.exe` to Session 1 and restored native rendering. This is an observed recovery, not a diagnosis of every Weston crash.
 

@@ -10,6 +10,7 @@ default-run = "twenty-one-pro"
 [features]
 dev-inspection = ["eframe/inspection"]
 dev-screenshot = ["eframe/__screenshot"]
+dev-fixtures = ["dep:tempfile"]
 
 [dependencies]
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "x11", "links", "accesskit"] }
@@ -20,9 +21,11 @@ serde_json = "1"
 redb = "4.3"
 directories = "6"
 thiserror = "2"
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+egui_kittest = { version = "0.36.2", default-features = false, features = ["eframe"] }
 
 [profile.release]
 lto = "thin"
