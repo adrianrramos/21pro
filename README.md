@@ -38,6 +38,54 @@ You can copy `21 Pro.app` into your Applications folder. This is a locally built
 
 The same native app also runs on Linux with an X11 display, a C linker, and OpenGL/EGL runtime libraries. On Debian/Ubuntu, install `build-essential pkg-config libxkbcommon-x11-0 libgl1 libegl1`, then use the same Cargo command. A headless server needs a display such as Xvfb. No Linux-only libraries are required on macOS.
 
+#### Unattended native visual verification (recommended)
+
+Use **Xvfb + Mesa software OpenGL** for routine agent runs over SSH. It runs the actual native app on a private virtual X11 display, without a Windows desktop login or WSLg. The Linux host/WSL distribution must still be running and reachable. Reserve WSLg for occasional Windows desktop-integration checks.
+
+Once per Debian/Ubuntu host, install these in addition to the Linux dependencies above:
+
+```sh
+sudo apt install xvfb xauth libgl1-mesa-dri
+```
+
+From an isolated development worktree:
+
+```sh
+./scripts/screenshot.sh
+# Optional destination (relative to the worktree root, or absolute):
+./scripts/screenshot.sh target/visual/review.png
+```
+
+The script builds with `dev-screenshot`, uses a fresh disposable profile even if `TWENTY_ONE_PRO_DATA_DIR` was already set, and writes `target/visual/table.png` by default. It fixes X11 scaling to 1 on a 1280×1024 virtual display, captures the app's 1180×860 initial window, then exits and removes the temporary profile/display. It overwrites the selected output only after a new capture succeeds. Generated images stay under the ignored `target/` directory when using the examples above.
+
+**Inspect the image before claiming visual success.** This is a real-render smoke command, not a pixel-baseline test or a full interaction test. It captures the initial table; later hands remain random. Software-rendered Linux pixels do not prove Windows/macOS desktop integration or GPU performance.
+
+Development features are opt-in; normal builds enable neither:
+
+| Cargo feature | Runtime control | Purpose |
+| --- | --- | --- |
+| `dev-screenshot` | `EFRAME_SCREENSHOT_TO=/absolute/path.png` | eframe's Glow startup capture, then exit; the script sets this automatically |
+| `dev-inspection` | `EGUI_INSPECTION=127.0.0.1:5719` | Live accessibility tree, input injection, resize, and PNG capture |
+
+For a long-running headless inspection session, run this from the worktree and stop with Ctrl+C when finished:
+
+```sh
+(
+    sandbox=$(mktemp -d)
+    trap 'rm -rf -- "$sandbox"' EXIT
+    env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u EFRAME_SCREENSHOT_TO \
+        LIBGL_ALWAYS_SOFTWARE=1 WINIT_X11_SCALE_FACTOR=1 \
+        XDG_RUNTIME_DIR="$sandbox" TWENTY_ONE_PRO_DATA_DIR="$sandbox/profile" \
+        EGUI_INSPECTION=127.0.0.1:5719 \
+        xvfb-run -a -s '-screen 0 1280x1024x24 -dpi 96 -nolisten tcp' \
+        cargo run --locked --features dev-inspection
+)
+```
+
+Inspection has **no authentication** and grants control of the app. Keep the endpoint on loopback, use a different port for each concurrent worktree, and use an SSH tunnel if the client runs elsewhere. The feature does not open an endpoint when `EGUI_INSPECTION` is unset or `0`. The screenshot script explicitly disables inspection. An MCP client is not configured by this setup.
+
+Headless verification exercised Mesa `llvmpipe` with unusable inherited display settings: initial screenshot, live inspection tree, Enter input, and a screenshot of the dealt hand. The 30 existing tests also passed with both development features enabled. Deterministic fixture/baseline coverage remains separate.
+
 #### WSLg development over SSH
 
 WSLg needs a working Windows desktop connection as well as an X11 socket. On this host, starting WSL from SSH without a signed-in Windows desktop left WSLg's `msrdc.exe` in noninteractive Session 0. X11 connections timed out and Weston repeatedly exited with signal 11. Restarting WSL from the signed-in desktop moved `msrdc.exe` to Session 1 and restored native rendering. This is an observed recovery, not a diagnosis of every Weston crash.
@@ -213,9 +261,9 @@ If the same hard 16 came **after a hit**, surrender is unavailable and the recom
 
 ```sh
 cargo fmt --all --check
-cargo check --locked --all-targets
-cargo test --locked --all-targets
-cargo clippy --locked --all-targets -- -D warnings
+cargo check --locked --all-targets --all-features
+cargo test --locked --all-targets --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
 The regression tests cover strategy chart boundaries and legal fallbacks, multiple aces, natural/split payouts, insurance, original-bet-only settlement, split limits, exact practice contexts, the 250-round boundary, scheduling transitions, analytics separation, database corruption, locking, and round-trip persistence.
