@@ -106,9 +106,10 @@ the default is `target/visual/`.
 The semantic assertions cover Play navigation, the initial bankroll and chip
 labels, disabled Deal and Yellow controls, exact mixed-chip wagering, dealing
 and hidden-hole-card accessibility, narrow-window discovery, invalid and
-cancelled reset, unfinished-round restart, and an unaffordable keyboard
-Double. Card ranks are intentionally not asserted. Screenshots are review
-artifacts, not pixel baselines.
+cancelled reset, unfinished-round restart, long numeric-history scrolling that
+keeps reset controls from moving, and an unaffordable keyboard Double. Card
+ranks are intentionally not asserted. Screenshots are review artifacts, not
+pixel baselines.
 
 #### Agent control through MCP
 

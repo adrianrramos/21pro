@@ -279,7 +279,8 @@ def assert_hidden_hole_card(client: McpClient) -> None:
 
 
 def open_reset(client: McpClient) -> None:
-    client.scroll("Session P/L")
+    client.scroll("Free Play", amount=900)
+    client.scroll("Session P/L", amount=900)
     client.click(content_contains="Reset session / new bankroll")
     client.wait_for(role="TextInput", timeout_secs=5)
 
@@ -394,6 +395,31 @@ def deal_mixed_wager_until_active(client: McpClient, bankroll: str = "1000.00") 
     raise VisualTestError("random shoe did not produce an unfinished round after 12 deals")
 
 
+def finish_current_round(client: McpClient) -> None:
+    for _ in range(40):
+        if not client.query(content_contains="Choose an action"):
+            return
+        insurance = client.query(role="Button", content_contains="No insurance")
+        client.press_key("N" if insurance and not insurance[0].get("disabled") else "S")
+        client.wait_for(min_steps=2, timeout_secs=5)
+    raise VisualTestError("could not finish a visible Free Play hand")
+
+
+def grow_numeric_history(client: McpClient, rounds: int = 30) -> None:
+    """Create enough settled rounds to exercise the bounded history table."""
+    for _ in range(rounds + 1):
+        finish_current_round(client)
+        if not client.query(role="Button", content_contains="Deal next hand"):
+            raise VisualTestError("Free Play round did not settle")
+        client.click(content_contains="Red $5.00")
+        client.press_key("Enter")
+        client.wait_for(min_steps=2, timeout_secs=10)
+    finish_current_round(client)
+
+def reset_bounds(client: McpClient) -> dict[str, float]:
+    return require_nodes(client, "Reset session / new bankroll", role="Button")[0]["bounds"]
+
+
 def run() -> None:
     artifact_dir = Path(os.environ.get("VISUAL_ARTIFACT_DIR", ROOT / "target/visual"))
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -451,6 +477,17 @@ def run() -> None:
                     "cards, or accessibility state"
                 )
             assert_active_round(client, "$870.00", "$130.00", "308")
+            print("Layout regression: keep reset position with long numeric history")
+            client.scroll("Free Play", amount=-2000)
+            finish_current_round(client)
+            reset_before = reset_bounds(client)
+            grow_numeric_history(client)
+            reset_after = reset_bounds(client)
+            if reset_after["y"] > reset_before["y"] + 4.0:
+                raise VisualTestError(
+                    f"numeric history pushed reset down: before={reset_before!r}, after={reset_after!r}"
+                )
+            client.screenshot(artifact_dir / "free-play-history.png")
 
             print("Failure path: invalid/cancelled reset and unaffordable keyboard action")
             reset_to_bankroll(client, "5.00")
@@ -486,6 +523,7 @@ def run() -> None:
             client.screenshot(artifact_dir / "free-play-affordability.png")
             print("Free Play visual smoke passed")
             print(f"Screenshots: {artifact_dir / 'free-play-dealt.png'},")
+            print(f"            {artifact_dir / 'free-play-history.png'},")
             print(f"            {artifact_dir / 'free-play-narrow.png'},")
             print(f"            {artifact_dir / 'free-play-affordability.png'}")
         finally:

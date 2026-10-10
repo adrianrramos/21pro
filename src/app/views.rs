@@ -948,20 +948,26 @@ impl TrainerApp {
                 w::MUTED,
             );
             ui.label(RichText::new("Numeric session history").strong());
-            egui::Grid::new("free-play-history")
-                .num_columns(3)
-                .spacing(vec2(16.0, 5.0))
+            egui::ScrollArea::vertical()
+                .id_salt("free-play-history-scroll")
+                .max_height(180.0)
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    ui.label(RichText::new("Round").color(w::MUTED));
-                    ui.label(RichText::new("Bankroll").color(w::MUTED));
-                    ui.label(RichText::new("Cumulative P/L").color(w::MUTED));
-                    ui.end_row();
-                    for point in history {
-                        ui.label(point.round.to_string());
-                        ui.label(play::money(point.bankroll_cents));
-                        ui.label(play::money(point.cumulative_net_cents));
-                        ui.end_row();
-                    }
+                    egui::Grid::new("free-play-history")
+                        .num_columns(3)
+                        .spacing(vec2(16.0, 5.0))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("Round").color(w::MUTED));
+                            ui.label(RichText::new("Bankroll").color(w::MUTED));
+                            ui.label(RichText::new("Cumulative P/L").color(w::MUTED));
+                            ui.end_row();
+                            for point in history {
+                                ui.label(point.round.to_string());
+                                ui.label(play::money(point.bankroll_cents));
+                                ui.label(play::money(point.cumulative_net_cents));
+                                ui.end_row();
+                            }
+                        });
                 });
         });
     }
