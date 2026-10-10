@@ -38,6 +38,47 @@ You can copy `21 Pro.app` into your Applications folder. This is a locally built
 
 The same native app also runs on Linux with an X11 display, a C linker, and OpenGL/EGL runtime libraries. On Debian/Ubuntu, install `build-essential pkg-config libxkbcommon-x11-0 libgl1 libegl1`, then use the same Cargo command. A headless server needs a display such as Xvfb. No Linux-only libraries are required on macOS.
 
+#### WSLg development over SSH
+
+WSLg needs a working Windows desktop connection as well as an X11 socket. On this host, starting WSL from SSH without a signed-in Windows desktop left WSLg's `msrdc.exe` in noninteractive Session 0. X11 connections timed out and Weston repeatedly exited with signal 11. Restarting WSL from the signed-in desktop moved `msrdc.exe` to Session 1 and restored native rendering. This is an observed recovery, not a diagnosis of every Weston crash.
+
+If this happens:
+
+1. Sign into the Windows desktop, locally or through Windows remote desktop.
+2. Save work in **all WSL sessions**. From Windows Terminal on that desktop—not over SSH—run:
+
+   ```powershell
+   wsl --shutdown
+   wsl -d Ubuntu
+   ```
+
+   Shutdown stops all WSL processes and disconnects agents. Leave the new Ubuntu terminal open, then reconnect Orca/SSH.
+3. Verify the socket mapping without modifying it:
+
+   ```sh
+   stat -Lc '%d:%i %n' /tmp/.X11-unix/X0 /mnt/wslg/.X11-unix/X0
+   findmnt -T /tmp/.X11-unix
+   ```
+
+   Matching device/inode pairs identify the same socket. A read-only mount is valid; the directory does **not** have to be a symlink. Do not delete or replace a working mount. Socket presence alone does not prove the display server responds.
+4. Install the Linux dependencies listed above, including `libxkbcommon-x11-0`. In the isolated development worktree, launch with a disposable profile:
+
+   ```sh
+   sandbox=$(mktemp -d)
+   DISPLAY=:0 TWENTY_ONE_PRO_DATA_DIR="$sandbox" cargo run --locked
+   # After closing the app:
+   rm -r -- "$sandbox"
+   ```
+
+   SSH sessions may lack `DISPLAY`; this command sets it only for the WSLg launch. Do not overwrite a deliberately configured SSH-forwarded or headless display.
+5. Confirm the actual window renders, then press Enter to deal and check that the cards and action buttons update. Successful compilation or a socket check is not visual verification.
+
+If connections still fail, inspect `/mnt/wslg/stderr.log` and `/mnt/wslg/weston.log`. From Windows PowerShell, `Get-Process explorer,msrdc | Select-Object ProcessName,Id,SessionId` helps distinguish the desktop and service sessions. Do not repeatedly restart WSL or rewrite socket paths without checking the failure.
+
+PR 1 verification exercised the native Glow/X11 app at 1180×860 on WSLg: captured the initial table, sent window-directed Enter input, and captured the dealt hand with action buttons. The profile was isolated from personal progress. This does not verify the later inspection/MCP integration or a Windows/macOS native build.
+
+References: [Microsoft WSL GUI support](https://learn.microsoft.com/en-us/windows/wsl/tutorials/gui-apps), [WSLg architecture](https://github.com/microsoft/wslg#architecture), and [X11 connection diagnostics](https://github.com/microsoft/wslg/wiki/Diagnosing-%22cannot-open-display%22-type-issues-with-WSLg).
+
 ## The training loop
 
 1. **The table:** play a finite six-deck shoe. Hit, stand, double, split, surrender, and make insurance decisions. Incorrect choices are explained immediately, but your chosen move is still played. A lucky win does not turn a mistake into a correct answer.
