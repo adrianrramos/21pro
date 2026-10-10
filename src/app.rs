@@ -1,5 +1,7 @@
 //! Desktop orchestration: render from state, then apply at most one user command.
 //! The game engine never depends on egui, and progress is saved after each decision.
+#[cfg(any(test, feature = "dev-fixtures"))]
+mod fixtures;
 mod views;
 mod widgets;
 
@@ -70,18 +72,23 @@ pub struct TrainerApp {
     heatmap: HandKind,
     selected_cell: Option<(HandKind, u8, u8)>,
     just_unlocked: bool,
-}
-
-pub(super) fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock must be after 1970")
-        .as_secs() as i64
+    // Store is declared first so the database closes before its temporary directory.
+    #[cfg(any(test, feature = "dev-fixtures"))]
+    fixture: Option<fixtures::Session>,
 }
 
 impl TrainerApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        widgets::configure(&cc.egui_ctx);
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        #[cfg(feature = "dev-fixtures")]
+        if let Some(fixture) = fixtures::Fixture::from_env()? {
+            return Self::fixture(&cc.egui_ctx, fixture);
+        }
+        #[cfg(not(feature = "dev-fixtures"))]
+        if std::env::var_os("TWENTY_ONE_PRO_FIXTURE").is_some() {
+            return Err("TWENTY_ONE_PRO_FIXTURE requires the dev-fixtures feature".into());
+        }
         let mut startup_error = None;
         let mut store = None;
         let mut profile = Profile::default();
@@ -104,6 +111,25 @@ impl TrainerApp {
                 PathBuf::new()
             }
         };
+        let mut app = Self::with_profile(
+            &cc.egui_ctx,
+            profile,
+            store,
+            data_path,
+            Game::new(rand::random()),
+        );
+        app.startup_error = startup_error;
+        Ok(app)
+    }
+
+    fn with_profile(
+        ctx: &egui::Context,
+        profile: Profile,
+        store: Option<Store>,
+        data_path: PathBuf,
+        table: Game,
+    ) -> Self {
+        widgets::configure(ctx);
         let analytics = profile.analytics(Some(StudyMode::Table));
         let table_stats = analytics.total;
         Self {
@@ -111,12 +137,12 @@ impl TrainerApp {
             profile,
             store,
             data_path,
-            startup_error,
+            startup_error: None,
             error: None,
             dirty: false,
             allow_close: false,
             close_warning: false,
-            table: Game::new(rand::random()),
+            table,
             table_feedback: Vec::new(),
             practice: None,
             practice_feedback: Vec::new(),
@@ -131,7 +157,47 @@ impl TrainerApp {
             heatmap: HandKind::Hard,
             selected_cell: None,
             just_unlocked: false,
+            #[cfg(any(test, feature = "dev-fixtures"))]
+            fixture: None,
         }
+    }
+
+    fn now(&self) -> i64 {
+        #[cfg(any(test, feature = "dev-fixtures"))]
+        if self.fixture.is_some() {
+            return fixtures::NOW;
+        }
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must be after 1970")
+            .as_secs() as i64
+    }
+
+    fn practice_seed(&mut self) -> u64 {
+        #[cfg(any(test, feature = "dev-fixtures"))]
+        if let Some(fixture) = &mut self.fixture {
+            return fixture.seed();
+        }
+        rand::random()
+    }
+
+    fn data_path_label(&self) -> std::borrow::Cow<'_, str> {
+        #[cfg(any(test, feature = "dev-fixtures"))]
+        if self.fixture.is_some() {
+            return "Temporary visual fixture profile (discarded on exit)".into();
+        }
+        self.data_path.to_string_lossy()
+    }
+
+    fn save_status(&self) -> &'static str {
+        if self.dirty {
+            return "UNSAVED CHANGES";
+        }
+        #[cfg(any(test, feature = "dev-fixtures"))]
+        if self.fixture.is_some() {
+            return "VISUAL FIXTURE · TEMPORARY";
+        }
+        "PROGRESS SAVED LOCALLY"
     }
 
     fn refresh_analytics(&mut self) {
@@ -168,7 +234,7 @@ impl TrainerApp {
             }
         } else if let Some(result) = &self.table.result {
             let was_unlocked = self.profile.assessment_unlocked();
-            self.profile.record_round(now(), result.net_half_units);
+            self.profile.record_round(self.now(), result.net_half_units);
             if !was_unlocked && self.profile.assessment_unlocked() {
                 self.just_unlocked = true;
                 self.page = Page::Insights;
@@ -178,7 +244,7 @@ impl TrainerApp {
 
     fn start_next_practice(&mut self) {
         if let Some(target) = self.practice_queue.front().copied() {
-            match Game::practice(target, rand::random()) {
+            match Game::practice(target, self.practice_seed()) {
                 Ok(game) => {
                     self.practice_queue.pop_front();
                     self.practice = Some(game);
@@ -247,7 +313,8 @@ impl TrainerApp {
                 } else {
                     StudyMode::Table
                 };
-                self.profile.record_attempt(situation, action, now(), mode);
+                self.profile
+                    .record_attempt(situation, action, self.now(), mode);
                 let feedback = Feedback {
                     situation,
                     chosen: action,
