@@ -82,9 +82,46 @@ For a long-running headless inspection session, run this from the worktree and s
 )
 ```
 
-Inspection has **no authentication** and grants control of the app. Keep the endpoint on loopback, use a different port for each concurrent worktree, and use an SSH tunnel if the client runs elsewhere. The feature does not open an endpoint when `EGUI_INSPECTION` is unset or `0`. The screenshot script explicitly disables inspection. An MCP client is not configured by this setup.
+Inspection has **no authentication** and grants control of the app. Keep the endpoint on loopback, use a different port for each concurrent worktree, and use an SSH tunnel if the client runs elsewhere. The feature does not open an endpoint when `EGUI_INSPECTION` is unset or `0`. The screenshot script explicitly disables inspection.
 
 Headless verification exercised Mesa `llvmpipe` with unusable inherited display settings: initial screenshot, live inspection tree, Enter input, and a screenshot of the dealt hand. The 30 existing tests also passed with both development features enabled. Deterministic fixture/baseline coverage remains separate.
+
+#### Agent control through MCP
+
+The project-scoped [`.omp/mcp.json`](.omp/mcp.json) registers the local `egui-mcp` stdio server with omp. It exposes the inspection capabilities above as agent tools; it does not launch the app, enable inspection in normal builds, or change user-level agent configuration.
+
+Install the verified server version once **on the host running omp** (the WSL SSH host for this workflow):
+
+```sh
+cargo install egui_mcp --version 0.2.0 --locked
+command -v egui-mcp
+```
+
+Cargo's installation bin directory (normally `~/.cargo/bin`) must be on the agent process's `PATH`. The server is local and needs no service account, API key, or separate subscription; normal AI-provider usage still applies.
+
+Start omp in this worktree. For an existing session already in this worktree, use `/mcp reload`, then:
+
+```text
+/mcp list
+/mcp test egui
+```
+
+The list should show `egui` from project configuration; the test should report 15 tools. These commands verify the MCP connection, not a running app. If the server is absent, check `mcp.enableProjectConfig` and any user-level `disabledServers` override. Do not duplicate the entry in global configuration.
+
+Launch the long-running headless inspection command above in a separate terminal, or have the agent launch it as a managed process. Then ask the agent to perform this sequence using the `egui` tools:
+
+1. `attach` with `{"host":"127.0.0.1","port":5719}`; confirm the returned app label is **21 Pro · Blackjack Strategy Trainer**.
+2. `query_tree` with `{"role":"button","content_contains":"Deal first hand"}`.
+3. `screenshot`, then `click` with the same button query, then query/capture again and inspect the dealt-hand state.
+4. `disconnect` when finished, and stop the headless app process to release its display and disposable profile. Disconnecting MCP alone does not stop the app.
+
+The screenshot tool returns an inline PNG; its optional `save_path` also writes on the **MCP server's host**, not the Mac/Windows client. Use an absolute path under the worktree's ignored `target/visual/` directory and create that directory first. No screenshot upload or committed baseline is required.
+
+For concurrent worktrees, pass each app's distinct inspection port to `attach`; MCP does not select by Git branch. Each MCP server has one attached app, so do not reattach a shared agent session to another worktree mid-verification. In omp, tools may appear as discoverable devices such as `xd://mcp__egui_query_tree`, rather than top-level functions.
+
+Verification used omp's actual project discovery and `/mcp test egui`, then the configured server's stdio MCP protocol to attach to Xvfb, find and click **Deal first hand**, observe the replacement action buttons, and capture the native 1180×860 window. MCP and omp exited cleanly; the app/display and disposable profile were removed. This verifies the integration without requiring an AI model call.
+
+Server documentation: [`egui_mcp` 0.2.0](https://docs.rs/crate/egui_mcp/0.2.0).
 
 #### WSLg development over SSH
 
