@@ -3,16 +3,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::model::{RULESET_ID, Situation};
+use crate::play::PlaySession;
+use crate::strategy::recommendation;
+use crate::training::{Profile, SCHEMA_VERSION, valid_situation};
 use directories::ProjectDirs;
 use redb::{Database, ReadableDatabase, TableDefinition};
 use thiserror::Error;
-
-use crate::model::{RULESET_ID, Situation};
-use crate::strategy::recommendation;
-use crate::training::{Profile, SCHEMA_VERSION, valid_situation};
-
 const PROFILE: TableDefinition<&str, &[u8]> = TableDefinition::new("profile");
 const PROFILE_KEY: &str = "current";
+
+const FREE_PLAY: TableDefinition<&str, &[u8]> = TableDefinition::new("free_play");
 
 const LEGACY_SCHEMA_VERSION: u64 = 1;
 
@@ -115,24 +116,69 @@ impl Store {
         validate(&profile)?;
         Ok(profile)
     }
-
-    /// Serialize before entering a write transaction. Commit atomically replaces
-    /// the single snapshot; a rejected profile leaves the previous one intact.
-    pub fn save(&self, profile: &Profile) -> Result<(), StorageError> {
-        // ponytail: one atomic snapshot suits a personal history; use append-only
-        // tables if long histories cause measurable save pauses.
-        validate(profile)?;
-        let snapshot = serde_json::to_vec(profile)
+    /// Loads the current versioned Free Play session.
+    ///
+    /// `None` means the database predates Free Play. Present but malformed
+    /// data is returned as an error and is never replaced with a new session.
+    pub fn load_free_play(&self) -> Result<Option<PlaySession>, StorageError> {
+        let read = self.database.begin_read().map_err(database_error)?;
+        let table = match read.open_table(FREE_PLAY) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(error) => return Err(database_error(error)),
+        };
+        let snapshot = table
+            .get(PROFILE_KEY)
+            .map_err(database_error)?
+            .ok_or_else(|| StorageError::Corrupt("Free Play snapshot is missing".to_owned()))?;
+        let session: PlaySession = serde_json::from_slice(snapshot.value())
             .map_err(|error| StorageError::Corrupt(error.to_string()))?;
+        session
+            .validate()
+            .map_err(|error| StorageError::Corrupt(error.to_string()))?;
+        Ok(Some(session))
+    }
+
+    /// Serialize all domains before one write transaction so profile and Free
+    /// Play either become visible together or neither does.
+    pub fn save_all(
+        &self,
+        profile: &Profile,
+        free_play: Option<&PlaySession>,
+    ) -> Result<(), StorageError> {
+        validate(profile)?;
+        let profile_snapshot = serde_json::to_vec(profile)
+            .map_err(|error| StorageError::Corrupt(error.to_string()))?;
+        let free_play_snapshot = free_play
+            .map(|session| {
+                session
+                    .validate()
+                    .map_err(|error| StorageError::Corrupt(error.to_string()))?;
+                serde_json::to_vec(session)
+                    .map_err(|error| StorageError::Corrupt(error.to_string()))
+            })
+            .transpose()?;
         let write = self.database.begin_write().map_err(database_error)?;
         {
             let mut table = write.open_table(PROFILE).map_err(database_error)?;
+            table
+                .insert(PROFILE_KEY, profile_snapshot.as_slice())
+                .map_err(database_error)?;
+        }
+        if let Some(snapshot) = free_play_snapshot {
+            let mut table = write.open_table(FREE_PLAY).map_err(database_error)?;
             table
                 .insert(PROFILE_KEY, snapshot.as_slice())
                 .map_err(database_error)?;
         }
         write.commit().map_err(database_error)?;
         Ok(())
+    }
+
+    /// Serialize before entering a write transaction. Commit atomically replaces
+    /// the single profile snapshot; a rejected profile leaves the previous one intact.
+    pub fn save(&self, profile: &Profile) -> Result<(), StorageError> {
+        self.save_all(profile, None)
     }
 }
 
@@ -291,6 +337,70 @@ mod tests {
             loaded.analytics(None).cells[&(HandKind::Hard, 16, 10)].attempts,
             2
         );
+    }
+
+    #[test]
+    fn free_play_snapshot_roundtrips_without_changing_profile_domains() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.redb");
+        let store = Store::open(&path).unwrap();
+        let profile = Profile::default();
+        let mut session = PlaySession::new(12);
+        session.add_chip(500).unwrap();
+        store.save_all(&profile, Some(&session)).unwrap();
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        assert!(reopened.load().unwrap().attempts.is_empty());
+        let loaded = reopened.load_free_play().unwrap().unwrap();
+        assert_eq!(loaded.pending_wager_cents(), 500);
+        assert_eq!(loaded.remaining_cards(), session.remaining_cards());
+    }
+
+    #[test]
+    fn finished_free_play_round_roundtrips_without_duplicate_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.redb");
+        let store = Store::open(&path).unwrap();
+        let profile = Profile::default();
+        let mut session = PlaySession::new(14);
+        session.add_chip(500).unwrap();
+        session.deal().unwrap();
+        while !matches!(session.phase(), crate::game::Phase::Finished) {
+            let action = if session.phase() == crate::game::Phase::Insurance {
+                Action::DeclineInsurance
+            } else {
+                Action::Stand
+            };
+            session.act(action).unwrap();
+        }
+        assert_eq!(session.history().len(), 2);
+        store.save_all(&profile, Some(&session)).unwrap();
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        let loaded = reopened.load_free_play().unwrap().unwrap();
+        loaded.validate().unwrap();
+        assert_eq!(loaded.history().len(), 2);
+        assert_eq!(loaded.available_cents(), session.available_cents());
+        assert_eq!(loaded.committed_cents(), 0);
+    }
+
+    #[test]
+    fn invalid_free_play_snapshot_is_reported_without_resetting_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("profile.redb")).unwrap();
+        let profile = Profile::default();
+        store.save(&profile).unwrap();
+        let mut invalid = serde_json::to_value(PlaySession::new(13)).unwrap();
+        invalid["schema_version"] = serde_json::json!(99);
+        let invalid: PlaySession = serde_json::from_value(invalid).unwrap();
+        assert!(matches!(
+            store.save_all(&profile, Some(&invalid)),
+            Err(StorageError::Corrupt(_))
+        ));
+        assert!(store.load_free_play().unwrap().is_none());
+        assert_eq!(store.load().unwrap().rounds_played(), 0);
     }
 
     #[test]

@@ -86,7 +86,8 @@ References: [Microsoft WSL GUI support](https://learn.microsoft.com/en-us/window
 3. **Your insights:** the assessment opens automatically at the threshold. It includes accuracy trends, mistakes by hand family, and separate hard-total, soft-total, and pair heatmaps. Table play and focused practice can be viewed separately or together.
 4. **Focused practice:** generate a 12-hand plan from due reviews and weak observed situations, or drill a specific heatmap situation. Practice uses the same engine, and hands continue after the targeted decision. If fewer than 12 distinct situations are known, the plan uses the available ones.
 5. **Card counting:** open the Card counting tab for a 52-card Hi-Lo trial from a freshly shuffled six-deck shoe. The final running count is checked after timing stops; only correct trials are saved, with the fastest history first.
-6. **Repeat over time:** mistakes enter a local spaced-repetition schedule. Due correct answers earn longer intervals; errors return sooner. History and due dates survive closing the app.
+6. **Free Play:** open Play without completing the training baseline. Choose a simulated bankroll, build a wager with red $5, green $25, black $100, or yellow $1,000 chips, and play the same fixed six-deck rules. The adjacent session graph records one settled point per original round.
+7. **Repeat over time:** mistakes enter a local spaced-repetition schedule. Due correct answers earn longer intervals; errors return sooner. History, due dates, counting trials, and the current Free Play shoe/session survive closing the app.
 
 ### Controls
 
@@ -160,9 +161,9 @@ On macOS, the database is:
 ~/Library/Application Support/dev.TwentyOnePro.21Pro/profile.redb
 ```
 
-The Rules screen shows the exact path on every platform. Close the app before copying that file as a backup. A single versioned JSON profile is committed transactionally inside a `redb` database. A locked, corrupt, wrong-ruleset, or unsupported-version profile produces an explicit error; the app does not silently replace it with empty progress.
+The Rules screen shows the exact path on every platform. Close the app before copying that file as a backup. A single versioned JSON profile and the current versioned Free Play session are committed transactionally inside a `redb` database. A locked, corrupt, wrong-ruleset, or unsupported-version profile or Free Play snapshot produces an explicit error; the app does not silently replace it with empty progress.
 
-Decisions, completed rounds, review schedules, and correct card-counting trials are saved locally. An **unfinished hand or counting trial is not resumed** after closing; already recorded decisions remain saved, but incomplete work and incorrect counting answers are not saved. If a write fails, play pauses, a retry is offered, and closing warns about unsaved changes.
+Decisions, completed rounds, review schedules, and correct card-counting trials are saved locally. Free Play saves its starting bankroll, exact cents accounting, graph history, undealt shoe order, dealer/player cards, active phase, split/insurance state, and unfinished round after every accepted change, so closing and reopening resumes the same session without redealing or duplicate settlement. If a write fails, play pauses, a retry is offered, and closing warns about unsaved changes.
 
 For an isolated development profile:
 
@@ -221,8 +222,6 @@ cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-The regression tests cover strategy chart boundaries and legal fallbacks, multiple aces, natural/split payouts, insurance, original-bet-only settlement, split limits, exact practice contexts, the 250-round boundary, scheduling transitions, analytics separation, six-deck card-counting boundaries and Hi-Lo values, database corruption, locking, and round-trip persistence.
+The regression suite covers strategy boundaries, multiple aces, natural/split payouts, insurance, original-bet-only settlement, split limits, exact practice contexts, the 250-round boundary, scheduling transitions, analytics separation, six-deck card-counting boundaries and Hi-Lo values, database corruption, locking, and round-trip persistence.
 
-Development verification exercised debug and optimized native Linux windows with real mouse/keyboard input: dealing, mistake feedback with the chosen move applied, the 249-to-250 assessment transition (including keeping the final correction visible), heatmaps at the minimum window size, a targeted hand, a 12-hand review plan, and persisted progress after closing. Engine smoke exercised 10,000 completed rounds and replayed 675 observed contexts as practice hands. The Apple Silicon target was checked with `cargo check --locked --target aarch64-apple-darwin`.
-
-**Not verified in the Linux development environment:** actual macOS launching, VoiceOver behavior, `.app` bundling on macOS, or signing/notarization. Build and launch on your Mac using the commands above to verify the native platform integration.
+Native UI integration still requires a real target display. Verify window launch, mouse/keyboard behavior, accessibility, narrow layouts, and persisted restart flows on the target platform; this repository does not claim those checks from headless Cargo tests.
