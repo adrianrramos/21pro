@@ -1,11 +1,16 @@
 //! Desktop orchestration: render from state, then apply at most one user command.
 //! The game engine never depends on egui, and progress is saved after each decision.
+#[cfg(any(test, feature = "dev-fixtures"))]
+mod fixtures;
 mod views;
 mod widgets;
+#[cfg(test)]
+mod workflow_tests;
 
 use eframe::egui;
 use std::{
     collections::VecDeque,
+    ffi::OsString,
     path::PathBuf,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -95,24 +100,36 @@ pub struct TrainerApp {
     heatmap: HandKind,
     selected_cell: Option<(HandKind, u8, u8)>,
     just_unlocked: bool,
+    // Store is declared first so the database closes before its temporary directory.
+    #[cfg(any(test, feature = "dev-fixtures"))]
+    fixture: Option<fixtures::Session>,
 }
 
-pub(super) fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock must be after 1970")
-        .as_secs() as i64
+fn configured_data_path(directory: Option<OsString>) -> Option<PathBuf> {
+    directory
+        .filter(|directory| !directory.is_empty())
+        .map(|directory| PathBuf::from(directory).join("profile.redb"))
 }
 
 impl TrainerApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        widgets::configure(&cc.egui_ctx);
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        #[cfg(feature = "dev-fixtures")]
+        if let Some(fixture) = fixtures::Fixture::from_env()? {
+            return Self::fixture(&cc.egui_ctx, fixture);
+        }
+        #[cfg(not(feature = "dev-fixtures"))]
+        if std::env::var_os("TWENTY_ONE_PRO_FIXTURE").is_some() {
+            return Err("TWENTY_ONE_PRO_FIXTURE requires the dev-fixtures feature".into());
+        }
         let mut startup_error = None;
         let mut store = None;
         let mut profile = Profile::default();
-        let path = std::env::var_os("TWENTY_ONE_PRO_DATA_DIR")
-            .map(|directory| Ok(PathBuf::from(directory).join("profile.redb")))
-            .unwrap_or_else(storage::default_path);
+        let path = match configured_data_path(std::env::var_os("TWENTY_ONE_PRO_DATA_DIR")) {
+            Some(path) => Ok(path),
+            None => storage::default_path(),
+        };
         let data_path = match path {
             Ok(path) => {
                 match Store::open(&path).and_then(|db| db.load().map(|saved| (db, saved))) {
@@ -129,6 +146,25 @@ impl TrainerApp {
                 PathBuf::new()
             }
         };
+        let mut app = Self::with_profile(
+            &cc.egui_ctx,
+            profile,
+            store,
+            data_path,
+            Game::new(rand::random()),
+        );
+        app.startup_error = startup_error;
+        Ok(app)
+    }
+
+    fn with_profile(
+        ctx: &egui::Context,
+        profile: Profile,
+        store: Option<Store>,
+        data_path: PathBuf,
+        table: Game,
+    ) -> Self {
+        widgets::configure(ctx);
         let analytics = profile.analytics(Some(StudyMode::Table));
         let table_stats = analytics.total;
         let counting_history = sorted_history(&profile.counting_history);
@@ -137,12 +173,12 @@ impl TrainerApp {
             profile,
             store,
             data_path,
-            startup_error,
+            startup_error: None,
             error: None,
             dirty: false,
             allow_close: false,
             close_warning: false,
-            table: Game::new(rand::random()),
+            table,
             table_feedback: Vec::new(),
             practice: None,
             practice_feedback: Vec::new(),
@@ -164,6 +200,8 @@ impl TrainerApp {
             heatmap: HandKind::Hard,
             selected_cell: None,
             just_unlocked: false,
+            #[cfg(any(test, feature = "dev-fixtures"))]
+            fixture: None,
         }
     }
 
@@ -204,6 +242,44 @@ impl TrainerApp {
         self.error = None;
     }
 
+    fn now(&self) -> i64 {
+        #[cfg(any(test, feature = "dev-fixtures"))]
+        if self.fixture.is_some() {
+            return fixtures::NOW;
+        }
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must be after 1970")
+            .as_secs() as i64
+    }
+
+    fn practice_seed(&mut self) -> u64 {
+        #[cfg(any(test, feature = "dev-fixtures"))]
+        if let Some(fixture) = &mut self.fixture {
+            return fixture.seed();
+        }
+        rand::random()
+    }
+
+    fn data_path_label(&self) -> std::borrow::Cow<'_, str> {
+        #[cfg(any(test, feature = "dev-fixtures"))]
+        if self.fixture.is_some() {
+            return "Temporary visual fixture profile (discarded on exit)".into();
+        }
+        self.data_path.to_string_lossy()
+    }
+
+    fn save_status(&self) -> &'static str {
+        if self.dirty {
+            return "UNSAVED CHANGES";
+        }
+        #[cfg(any(test, feature = "dev-fixtures"))]
+        if self.fixture.is_some() {
+            return "VISUAL FIXTURE · TEMPORARY";
+        }
+        "PROGRESS SAVED LOCALLY"
+    }
+
     fn refresh_analytics(&mut self) {
         self.analytics = self.profile.analytics(self.filter);
         self.table_stats = if self.filter == Some(StudyMode::Table) {
@@ -242,7 +318,7 @@ impl TrainerApp {
             }
         } else if let Some(result) = &self.table.result {
             let was_unlocked = self.profile.assessment_unlocked();
-            self.profile.record_round(now(), result.net_half_units);
+            self.profile.record_round(self.now(), result.net_half_units);
             if !was_unlocked && self.profile.assessment_unlocked() {
                 self.just_unlocked = true;
                 self.page = Page::Insights;
@@ -252,7 +328,7 @@ impl TrainerApp {
 
     fn start_next_practice(&mut self) {
         if let Some(target) = self.practice_queue.front().copied() {
-            match Game::practice(target, rand::random()) {
+            match Game::practice(target, self.practice_seed()) {
                 Ok(game) => {
                     self.practice_queue.pop_front();
                     self.practice = Some(game);
@@ -323,7 +399,8 @@ impl TrainerApp {
                 } else {
                     StudyMode::Table
                 };
-                self.profile.record_attempt(situation, action, now(), mode);
+                self.profile
+                    .record_attempt(situation, action, self.now(), mode);
                 let feedback = Feedback {
                     situation,
                     chosen: action,
@@ -394,7 +471,7 @@ impl TrainerApp {
                 self.counting_assessment = Some(CountingAssessment { submitted, actual });
                 if correct {
                     self.profile
-                        .record_counting_trial(now(), elapsed.as_millis() as u64);
+                        .record_counting_trial(self.now(), elapsed.as_millis() as u64);
                     if self.persist_progress() {
                         self.cache_counting_history();
                     }
@@ -539,45 +616,68 @@ impl eframe::App for TrainerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
-    use twenty_one_pro::counting::TRIAL_SIZE;
+    use eframe::App;
+    use tempfile::{TempDir, tempdir};
+    use twenty_one_pro::{counting::TRIAL_SIZE, training::SCHEMA_VERSION};
 
     fn test_app(store: Store) -> TrainerApp {
-        let profile = Profile::default();
-        let analytics = profile.analytics(Some(StudyMode::Table));
-        TrainerApp {
-            page: Page::Counting,
-            profile,
-            store: Some(store),
-            data_path: PathBuf::new(),
-            startup_error: None,
-            error: None,
-            dirty: false,
-            allow_close: false,
-            close_warning: false,
-            table: Game::new(1),
-            table_feedback: Vec::new(),
-            practice: None,
-            practice_feedback: Vec::new(),
-            practice_queue: VecDeque::new(),
-            practice_total: 0,
-            practice_completed: 0,
-            practice_start_attempt: 0,
-            practice_target: None,
-            counting: None,
-            counting_started_at: None,
-            counting_elapsed: None,
-            counting_input: String::new(),
-            counting_input_error: None,
-            counting_assessment: None,
-            counting_history: Vec::new(),
-            filter: Some(StudyMode::Table),
-            table_stats: analytics.total,
-            analytics,
-            heatmap: HandKind::Hard,
-            selected_cell: None,
-            just_unlocked: false,
+        let mut app = TrainerApp::with_profile(
+            &egui::Context::default(),
+            Profile::default(),
+            Some(store),
+            PathBuf::new(),
+            Game::new(1),
+        );
+        app.page = Page::Counting;
+        app
+    }
+
+    fn app_with_store() -> (TempDir, TrainerApp) {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("profile.redb");
+        let store = Store::open(&path).unwrap();
+        let app = TrainerApp::with_profile(
+            &egui::Context::default(),
+            Profile::default(),
+            Some(store),
+            path,
+            Game::new(0),
+        );
+        (directory, app)
+    }
+
+    fn finish_table_with_strategy(app: &mut TrainerApp) {
+        while app.table.phase != Phase::Finished {
+            let situation = app.table.situation().unwrap();
+            app.execute(Command::Act(strategy::recommendation(situation).action));
         }
+    }
+
+    #[test]
+    fn empty_data_directory_override_is_ignored() {
+        assert_eq!(configured_data_path(Some(OsString::new())), None);
+        assert_eq!(
+            configured_data_path(Some(OsString::from("/tmp/21pro"))),
+            Some(PathBuf::from("/tmp/21pro/profile.redb"))
+        );
+    }
+
+    #[test]
+    fn natural_deal_records_and_persists_one_original_round() {
+        let (_directory, mut app) = app_with_store();
+        for seed in 0..1000 {
+            app.table = Game::new(seed);
+            app.execute(Command::Deal);
+            if app.table.result.is_some() {
+                break;
+            }
+        }
+        assert!(app.table.result.is_some());
+        assert_eq!(app.profile.rounds_played(), 1);
+        assert_eq!(
+            app.store.as_ref().unwrap().load().unwrap().rounds_played(),
+            1
+        );
     }
 
     fn finish_counting_trial(app: &mut TrainerApp, seed: u64) -> i32 {
@@ -716,5 +816,86 @@ mod tests {
         ));
         app.execute(Command::FinishCounting);
         assert!(app.counting_elapsed.is_some());
+    }
+
+    #[test]
+    fn split_settlement_records_and_persists_one_original_round() {
+        let (_directory, mut app) = app_with_store();
+        let target = Situation {
+            kind: HandKind::Pair,
+            value: 8,
+            dealer: 6,
+            can_double: true,
+            can_split: true,
+            can_surrender: true,
+            split_aces: false,
+        };
+        app.table = Game::practice(target, 0).unwrap();
+        app.execute(Command::Act(Action::Split));
+        finish_table_with_strategy(&mut app);
+
+        assert_eq!(app.profile.rounds_played(), 1);
+        assert!(app.profile.attempts.len() >= 2);
+        assert_eq!(
+            app.store.as_ref().unwrap().load().unwrap().rounds_played(),
+            1
+        );
+    }
+
+    #[test]
+    fn failed_save_pauses_play_and_close_until_retry_or_discard() {
+        let (_directory, mut app) = app_with_store();
+        let target = Situation {
+            kind: HandKind::Hard,
+            value: 16,
+            dealer: 10,
+            can_double: true,
+            can_split: false,
+            can_surrender: true,
+            split_aces: false,
+        };
+        app.table = Game::practice(target, 0).unwrap();
+        app.profile.schema_version = SCHEMA_VERSION + 1;
+        app.execute(Command::Act(Action::Stand));
+
+        assert!(app.dirty);
+        assert!(app.error.is_some());
+        let attempts = app.profile.attempts.len();
+        app.execute(Command::Act(Action::Hit));
+        assert_eq!(app.profile.attempts.len(), attempts);
+
+        app.page = Page::Rules;
+        let context = egui::Context::default();
+        let mut viewports = egui::ViewportIdMap::default();
+        viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                events: vec![egui::ViewportEvent::Close],
+                ..Default::default()
+            },
+        );
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut output = context.run_ui(
+            egui::RawInput {
+                viewport_id: egui::ViewportId::ROOT,
+                viewports,
+                ..Default::default()
+            },
+            |ui| app.ui(ui, &mut frame),
+        );
+        output.textures_delta.clear();
+        let root = output.viewport_output.get(&egui::ViewportId::ROOT).unwrap();
+        assert!(root.commands.contains(&egui::ViewportCommand::CancelClose));
+        assert!(app.close_warning);
+        assert!(!app.allow_close);
+
+        app.profile.schema_version = SCHEMA_VERSION;
+        app.execute(Command::RetrySave);
+        assert!(!app.dirty);
+        assert!(app.error.is_none());
+        assert_eq!(
+            app.store.as_ref().unwrap().load().unwrap().rounds_played(),
+            1
+        );
     }
 }
