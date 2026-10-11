@@ -102,6 +102,8 @@ pub struct Profile {
     pub reviews: Vec<ReviewState>,
     #[serde(default)]
     pub counting_history: Vec<CountingRecord>,
+    /// Set once when the unlocked Insights page is displayed; persisted so the
+    /// baseline block stays hidden across restarts. Older snapshots default to false.
     #[serde(default)]
     pub insights_opened: bool,
 }
