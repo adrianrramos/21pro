@@ -91,11 +91,11 @@ impl TrainerApp {
                 let show_baseline =
                     !self.profile.assessment_unlocked() || !self.profile.insights_opened;
                 let reservation = if !show_baseline {
-                    199.0
+                    90.0
                 } else if self.profile.assessment_unlocked() {
-                    270.0
+                    190.0
                 } else {
-                    274.0
+                    194.0
                 };
                 ui.add_space((ui.available_height() - reservation).max(24.0));
                 if show_baseline {
