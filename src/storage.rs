@@ -340,6 +340,52 @@ mod tests {
     }
 
     #[test]
+    fn current_profiles_without_insights_opened_still_load_and_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("profile.redb")).unwrap();
+        let mut profile = Profile::default();
+        profile.record_round(42, 3);
+        profile.record_attempt(situation(), Action::Stand, 100, StudyMode::Table);
+        let expected_rounds = serde_json::to_value(&profile.rounds).unwrap();
+        let expected_attempts = serde_json::to_value(&profile.attempts).unwrap();
+        let expected_reviews = serde_json::to_value(&profile.reviews).unwrap();
+        let mut snapshot = serde_json::to_value(&profile).unwrap();
+        snapshot.as_object_mut().unwrap().remove("insights_opened");
+        raw_snapshot(&store, &serde_json::to_vec(&snapshot).unwrap());
+
+        let loaded = store.load().unwrap();
+        assert!(!loaded.insights_opened);
+        assert_eq!(
+            serde_json::to_value(&loaded.rounds).unwrap(),
+            expected_rounds
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded.attempts).unwrap(),
+            expected_attempts
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded.reviews).unwrap(),
+            expected_reviews
+        );
+
+        store.save(&loaded).unwrap();
+        let reloaded = store.load().unwrap();
+        assert!(!reloaded.insights_opened);
+        assert_eq!(
+            serde_json::to_value(&reloaded.rounds).unwrap(),
+            expected_rounds
+        );
+        assert_eq!(
+            serde_json::to_value(&reloaded.attempts).unwrap(),
+            expected_attempts
+        );
+        assert_eq!(
+            serde_json::to_value(&reloaded.reviews).unwrap(),
+            expected_reviews
+        );
+    }
+
+    #[test]
     fn negative_counting_completion_is_corruption() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("profile.redb")).unwrap();

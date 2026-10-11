@@ -102,6 +102,8 @@ pub struct Profile {
     pub reviews: Vec<ReviewState>,
     #[serde(default)]
     pub counting_history: Vec<CountingRecord>,
+    #[serde(default)]
+    pub insights_opened: bool,
 }
 
 impl Default for Profile {
@@ -113,6 +115,7 @@ impl Default for Profile {
             attempts: Vec::new(),
             reviews: Vec::new(),
             counting_history: Vec::new(),
+            insights_opened: false,
         }
     }
 }
