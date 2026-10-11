@@ -67,7 +67,8 @@ impl TrainerApp {
                     (Page::Insights, "02", "Your insights"),
                     (Page::Practice, "03", "Practice"),
                     (Page::Counting, "04", "Card counting"),
-                    (Page::Rules, "05", "Rules"),
+                    (Page::Variance, "05", "Simulator"),
+                    (Page::Rules, "06", "Rules"),
                 ] {
                     let selected = self.page == page;
                     let label = format!("{number}   {title}");

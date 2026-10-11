@@ -2,6 +2,7 @@
 //! The game engine never depends on egui, and progress is saved after each decision.
 #[cfg(any(test, feature = "dev-fixtures"))]
 mod fixtures;
+mod variance_view;
 mod views;
 mod widgets;
 #[cfg(test)]
@@ -21,6 +22,7 @@ use twenty_one_pro::{
     storage::{self, Store},
     strategy,
     training::{Analytics, CellStats, Profile, StudyMode},
+    variance::{self, Inputs, SimulationResult},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -29,6 +31,7 @@ enum Page {
     Insights,
     Practice,
     Counting,
+    Variance,
     Rules,
 }
 
@@ -64,6 +67,7 @@ enum Command {
     NextCounting,
     FinishCounting,
     SubmitCounting,
+    RunVariance,
     RetrySave,
 }
 
@@ -100,9 +104,35 @@ pub struct TrainerApp {
     heatmap: HandKind,
     selected_cell: Option<(HandKind, u8, u8)>,
     just_unlocked: bool,
+    variance: VarianceState,
     // Store is declared first so the database closes before its temporary directory.
     #[cfg(any(test, feature = "dev-fixtures"))]
     fixture: Option<fixtures::Session>,
+}
+struct VarianceState {
+    hourly_ev: String,
+    hourly_sd: String,
+    bankroll: String,
+    hours: String,
+    players: usize,
+    show_sd: bool,
+    errors: [Option<String>; 4],
+    result: Option<SimulationResult>,
+}
+
+impl Default for VarianceState {
+    fn default() -> Self {
+        Self {
+            hourly_ev: variance::DEFAULT_HOURLY_EV.to_string(),
+            hourly_sd: variance::DEFAULT_HOURLY_SD.to_string(),
+            bankroll: variance::DEFAULT_BANKROLL.to_string(),
+            hours: variance::DEFAULT_HOURS.to_string(),
+            players: variance::DEFAULT_PLAYERS,
+            show_sd: true,
+            errors: [None, None, None, None],
+            result: None,
+        }
+    }
 }
 
 fn configured_data_path(directory: Option<OsString>) -> Option<PathBuf> {
@@ -111,6 +141,82 @@ fn configured_data_path(directory: Option<OsString>) -> Option<PathBuf> {
         .map(|directory| PathBuf::from(directory).join("profile.redb"))
 }
 
+impl VarianceState {
+    fn snapshot(&mut self) -> Option<Inputs> {
+        self.errors = [None, None, None, None];
+        let hourly_ev = parse_money(&self.hourly_ev, &mut self.errors[0], "Hourly EV")?;
+        let hourly_sd = parse_money(
+            &self.hourly_sd,
+            &mut self.errors[1],
+            "Hourly standard deviation",
+        )?;
+        let bankroll = parse_money(&self.bankroll, &mut self.errors[2], "Starting bankroll")?;
+        let hours = parse_integer(&self.hours, &mut self.errors[3], "Hours")?;
+        if !(-1_000_000.0..=1_000_000.0).contains(&hourly_ev) {
+            self.errors[0] =
+                Some("Hourly EV must be between -$1,000,000 and $1,000,000.".to_owned());
+            return None;
+        }
+        if !(0.0..=1_000_000.0).contains(&hourly_sd) {
+            self.errors[1] =
+                Some("Hourly standard deviation must be between $0 and $1,000,000.".to_owned());
+            return None;
+        }
+        if !(0.0..=1_000_000_000.0).contains(&bankroll) {
+            self.errors[2] =
+                Some("Starting bankroll must be between $0 and $1,000,000,000.".to_owned());
+            return None;
+        }
+        if !(1..=10_000).contains(&hours) {
+            self.errors[3] = Some("Hours must be a whole number from 1 through 10,000.".to_owned());
+            return None;
+        }
+        let inputs = Inputs {
+            hourly_ev,
+            hourly_sd,
+            starting_bankroll: bankroll,
+            hours,
+            players: self.players,
+        };
+        inputs.validate().ok()
+    }
+}
+
+fn parse_money(text: &str, error: &mut Option<String>, label: &str) -> Option<f64> {
+    let trimmed = text.trim();
+    let fractional_digits = trimmed
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len());
+    if trimmed.is_empty()
+        || trimmed.matches('.').count() > 1
+        || trimmed.contains(['e', 'E'])
+        || fractional_digits > 2
+    {
+        *error = Some(format!(
+            "{label} must be a finite dollar amount with at most two decimal places."
+        ));
+        return None;
+    }
+    match trimmed.parse::<f64>() {
+        Ok(value) if value.is_finite() => Some(value),
+        _ => {
+            *error = Some(format!(
+                "{label} must be a finite dollar amount with at most two decimal places."
+            ));
+            None
+        }
+    }
+}
+
+fn parse_integer(text: &str, error: &mut Option<String>, label: &str) -> Option<usize> {
+    match text.trim().parse::<usize>() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            *error = Some(format!("{label} must be a whole number."));
+            None
+        }
+    }
+}
 impl TrainerApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -200,6 +306,7 @@ impl TrainerApp {
             heatmap: HandKind::Hard,
             selected_cell: None,
             just_unlocked: false,
+            variance: VarianceState::default(),
             #[cfg(any(test, feature = "dev-fixtures"))]
             fixture: None,
         }
@@ -437,6 +544,14 @@ impl TrainerApp {
                 self.refresh_analytics();
                 self.persist_progress();
             }
+            Command::RunVariance => {
+                if let Some(inputs) = self.variance.snapshot() {
+                    let seed = self.practice_seed();
+                    if let Ok(result) = SimulationResult::simulate(inputs, seed) {
+                        self.variance.result = Some(result);
+                    }
+                }
+            }
             Command::StartPractice(queue) => {
                 if !self.profile.assessment_unlocked() || queue.is_empty() {
                     return;
@@ -633,6 +748,7 @@ impl eframe::App for TrainerApp {
                         Page::Insights => self.insights_view(ui, &mut command),
                         Page::Practice => self.practice_view(ui, &mut command),
                         Page::Counting => self.counting_view(ui, &mut command),
+                        Page::Variance => self.variance_view(ui, &mut command),
                         Page::Rules => self.rules_view(ui),
                     }
                 });
@@ -955,5 +1071,26 @@ mod tests {
             app.store.as_ref().unwrap().load().unwrap().rounds_played(),
             1
         );
+    }
+    #[test]
+    fn variance_run_is_session_only_and_invalid_edits_preserve_result() {
+        let (_directory, mut app) = app_with_store();
+        app.page = Page::Variance;
+        let rounds = app.profile.rounds_played();
+        app.execute(Command::RunVariance);
+        let seed = app.variance.result.as_ref().unwrap().seed;
+        assert_eq!(app.variance.result.as_ref().unwrap().paths.len(), 1);
+        assert_eq!(app.profile.rounds_played(), rounds);
+        assert!(!app.dirty);
+
+        app.variance.hours = "1.5".to_owned();
+        app.execute(Command::RunVariance);
+        assert_eq!(app.variance.result.as_ref().unwrap().seed, seed);
+        assert!(app.variance.errors[3].is_some());
+
+        app.variance.hours.clear();
+        app.execute(Command::RunVariance);
+        assert_eq!(app.variance.result.as_ref().unwrap().seed, seed);
+        assert!(app.variance.errors[3].is_some());
     }
 }
