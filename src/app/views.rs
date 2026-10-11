@@ -237,7 +237,15 @@ impl TrainerApp {
                 ui.label(RichText::new("Baseline complete. Your personalized training is ready.").strong().color(w::GREEN));
                 w::muted(ui, "250 rounds is a starting sample, not proof of mastery. Rare hands may still be unseen.");
                 ui.horizontal_wrapped(|ui| {
-                    if w::primary(ui, "Start focused practice").clicked() { *command = Some(Command::StartPractice(self.profile.practice_queue(self.now(), 12))); }
+                    if w::primary(ui, "Start focused practice").clicked() {
+                        match self.now() {
+                            Ok(now) => {
+                                *command =
+                                    Some(Command::StartPractice(self.profile.practice_queue(now, 12)));
+                            }
+                            Err(error) => self.error = Some(error),
+                        }
+                    }
                     if ui.button("See my last hand").clicked() { self.page = Page::Table; }
                     if ui.small_button("Dismiss").clicked() { self.just_unlocked = false; }
                 });
@@ -356,11 +364,18 @@ impl TrainerApp {
                         "{} / {} missed",
                         skill.stats.mistakes, skill.stats.attempts
                     ));
-                    ui.label(
-                        RichText::new(w::due_label(skill.due_at, self.now()))
-                            .size(12.0)
-                            .color(w::MUTED),
-                    );
+                    match self.now() {
+                        Ok(now) => {
+                            ui.label(
+                                RichText::new(w::due_label(skill.due_at, now))
+                                    .size(12.0)
+                                    .color(w::MUTED),
+                            );
+                        }
+                        Err(error) => {
+                            w::muted(ui, format!("Review schedule unavailable: {error}"));
+                        }
+                    }
                     if ui.small_button("Drill").clicked() {
                         *command = Some(Command::StartPractice(vec![skill.situation]));
                     }
@@ -447,7 +462,13 @@ impl TrainerApp {
             });
             ui.add_space(14.0);
         }
-        let time = self.now();
+        let time = match self.now() {
+            Ok(time) => time,
+            Err(error) => {
+                w::muted(ui, format!("Review schedule unavailable: {error}"));
+                return;
+            }
+        };
         let due = self.profile.due_count(time);
         let next_due = self
             .profile

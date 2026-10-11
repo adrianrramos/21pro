@@ -207,6 +207,9 @@ impl Game {
     }
 
     pub fn act(&mut self, action: Action) -> Result<(), GameError> {
+        if self.phase == Phase::Playing && self.dealer.first().is_none() {
+            return Err(GameError::InvalidState("the dealer upcard is missing"));
+        }
         let situation = self.situation().ok_or(GameError::NoActiveDecision)?;
         // Check before any draw, RNG advance, bet change, or other mutation.
         if !situation.allows(action) {
@@ -863,7 +866,7 @@ mod tests {
         assert_eq!(missing_dealer.situation(), None);
         assert_eq!(
             missing_dealer.act(Action::Hit),
-            Err(GameError::NoActiveDecision)
+            Err(GameError::InvalidState("the dealer upcard is missing"))
         );
 
         let mut exhausted = Game::new(2);
