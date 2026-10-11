@@ -247,10 +247,14 @@ impl TrainerApp {
         if self.fixture.is_some() {
             return fixtures::NOW;
         }
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock must be after 1970")
-            .as_secs() as i64
+        Self::unix_timestamp(SystemTime::now())
+    }
+
+    fn unix_timestamp(time: SystemTime) -> i64 {
+        match time.duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs().min(i64::MAX as u64) as i64,
+            Err(error) => -(error.duration().as_secs().min(i64::MAX as u64) as i64),
+        }
     }
 
     fn practice_seed(&mut self) -> u64 {
@@ -477,7 +481,7 @@ impl TrainerApp {
                     }
                 }
             }
-            Command::RetrySave => unreachable!(),
+            Command::RetrySave => {}
         }
     }
 
@@ -660,6 +664,12 @@ mod tests {
             configured_data_path(Some(OsString::from("/tmp/21pro"))),
             Some(PathBuf::from("/tmp/21pro/profile.redb"))
         );
+    }
+
+    #[test]
+    fn timestamp_handles_clock_before_unix_epoch() {
+        let before_epoch = UNIX_EPOCH - Duration::from_secs(7);
+        assert_eq!(TrainerApp::unix_timestamp(before_epoch), -7);
     }
 
     #[test]
