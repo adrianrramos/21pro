@@ -27,3 +27,11 @@ Use the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/) as th
 Before changing an exported type, function, enum, serialized representation, or module boundary, inspect its callers and tests. Prefer a small compatible API over a speculative abstraction. Update all affected call sites and documentation in the same change. Run `cargo fmt --check`, `cargo check`, and the relevant tests after Rust changes; use Clippy when available for API or idiom changes.
 
 The upstream guidelines are the authority for details and rationale. Project requirements and an explicitly documented compatibility constraint take precedence over a guideline when they conflict.
+
+## Safety and failure handling
+
+- Obtain explicit human approval before adding or changing `unsafe` Rust; document the safety invariant beside each unsafe block.
+- Keep `unwrap` and `expect` only for invariants enforced locally by types or immediately preceding checks. State the invariant in a nearby comment when it is not obvious.
+- Handle every recoverable `Result` at its shared boundary: propagate with `?`, or present an actionable error without resetting or silently discarding user data.
+- Add focused edge-case tests for changed failure paths and assert observable errors or preserved state.
+- Obtain human approval before migrations, security-sensitive changes, or destructive operations such as deleting or rewriting user data.

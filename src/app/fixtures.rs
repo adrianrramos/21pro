@@ -132,14 +132,19 @@ fn sample_profile() -> Result<Profile, GameError> {
                 Action::ALL
                     .into_iter()
                     .find(|&action| action != expected && situation.allows(action))
-                    .unwrap_or(expected)
+                    .ok_or(GameError::InvalidPractice(
+                        "fixture requires an alternate legal action",
+                    ))?
             } else {
                 expected
             };
             game.act(chosen)?;
             profile.record_attempt(situation, chosen, at, StudyMode::Table);
         }
-        let result = game.result.as_ref().expect("fixture round must settle");
+        let result = game
+            .result
+            .as_ref()
+            .ok_or(GameError::InvalidPractice("fixture round must settle"))?;
         profile.record_round(at, result.net_half_units);
     }
     Ok(profile)

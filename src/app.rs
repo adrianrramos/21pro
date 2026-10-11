@@ -16,7 +16,7 @@ use std::{
 };
 use twenty_one_pro::{
     counting::{CountingRecord, CountingTrial, parse_submitted_count, sorted_history},
-    game::{Game, Phase},
+    game::{Game, GameError, Phase},
     model::{Action, HandKind, Situation},
     storage::{self, Store},
     strategy,
@@ -242,15 +242,18 @@ impl TrainerApp {
         self.error = None;
     }
 
-    fn now(&self) -> i64 {
+    fn now(&self) -> Result<i64, String> {
         #[cfg(any(test, feature = "dev-fixtures"))]
         if self.fixture.is_some() {
-            return fixtures::NOW;
+            return Ok(fixtures::NOW);
         }
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock must be after 1970")
-            .as_secs() as i64
+        Self::unix_timestamp(SystemTime::now())
+    }
+
+    fn unix_timestamp(time: SystemTime) -> Result<i64, String> {
+        time.duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+            .map_err(|error| format!("System clock is before the Unix epoch: {error}"))
     }
 
     fn practice_seed(&mut self) -> u64 {
@@ -309,7 +312,7 @@ impl TrainerApp {
     }
 
     // Called once per successful deal/action; finished games reject further actions.
-    fn finish_round(&mut self, practice: bool) {
+    fn finish_round(&mut self, practice: bool, at: i64) {
         if practice {
             if let Some(game) = &self.practice
                 && game.phase == Phase::Finished
@@ -318,7 +321,7 @@ impl TrainerApp {
             }
         } else if let Some(result) = &self.table.result {
             let was_unlocked = self.profile.assessment_unlocked();
-            self.profile.record_round(self.now(), result.net_half_units);
+            self.profile.record_round(at, result.net_half_units);
             if !was_unlocked && self.profile.assessment_unlocked() {
                 self.just_unlocked = true;
                 self.page = Page::Insights;
@@ -358,12 +361,19 @@ impl TrainerApp {
         }
         match command {
             Command::Deal => {
+                let at = match self.now() {
+                    Ok(at) => at,
+                    Err(error) => {
+                        self.error = Some(error);
+                        return;
+                    }
+                };
                 match self.table.deal() {
                     Ok(()) => {
                         self.just_unlocked = false;
                         self.table_feedback.clear();
                         self.error = None;
-                        self.finish_round(false);
+                        self.finish_round(false, at);
                         self.refresh_analytics();
                         // A natural can finish a round without a decision.
                         if self.table.result.is_some() {
@@ -374,6 +384,13 @@ impl TrainerApp {
                 }
             }
             Command::Act(action) => {
+                let at = match self.now() {
+                    Ok(at) => at,
+                    Err(error) => {
+                        self.error = Some(error);
+                        return;
+                    }
+                };
                 let practice = self.page == Page::Practice;
                 let game = if practice {
                     self.practice.as_mut()
@@ -384,6 +401,11 @@ impl TrainerApp {
                     return;
                 };
                 let Some(situation) = game.situation() else {
+                    if game.phase == Phase::Playing {
+                        self.error = Some(
+                            GameError::InvalidState("the dealer upcard is missing").to_string(),
+                        );
+                    }
                     return;
                 };
                 if !situation.allows(action) {
@@ -399,8 +421,7 @@ impl TrainerApp {
                 } else {
                     StudyMode::Table
                 };
-                self.profile
-                    .record_attempt(situation, action, self.now(), mode);
+                self.profile.record_attempt(situation, action, at, mode);
                 let feedback = Feedback {
                     situation,
                     chosen: action,
@@ -412,7 +433,7 @@ impl TrainerApp {
                 } else {
                     self.table_feedback.push(feedback);
                 }
-                self.finish_round(practice);
+                self.finish_round(practice, at);
                 self.refresh_analytics();
                 self.persist_progress();
             }
@@ -467,17 +488,28 @@ impl TrainerApp {
                 };
                 let actual = trial.actual_count();
                 let correct = submitted == actual;
+                let at = if correct {
+                    Some(match self.now() {
+                        Ok(at) => at,
+                        Err(error) => {
+                            self.error = Some(error);
+                            return;
+                        }
+                    })
+                } else {
+                    None
+                };
                 self.counting_input_error = None;
                 self.counting_assessment = Some(CountingAssessment { submitted, actual });
-                if correct {
+                if let Some(at) = at {
                     self.profile
-                        .record_counting_trial(self.now(), elapsed.as_millis() as u64);
+                        .record_counting_trial(at, elapsed.as_millis() as u64);
                     if self.persist_progress() {
                         self.cache_counting_history();
                     }
                 }
             }
-            Command::RetrySave => unreachable!(),
+            Command::RetrySave => {}
         }
     }
 
@@ -659,6 +691,32 @@ mod tests {
         assert_eq!(
             configured_data_path(Some(OsString::from("/tmp/21pro"))),
             Some(PathBuf::from("/tmp/21pro/profile.redb"))
+        );
+    }
+
+    #[test]
+    fn timestamp_rejects_clock_before_unix_epoch() {
+        let before_epoch = UNIX_EPOCH - Duration::from_secs(7);
+        assert!(TrainerApp::unix_timestamp(before_epoch).is_err());
+    }
+
+    #[test]
+    fn malformed_table_action_surfaces_state_error() {
+        let mut app = TrainerApp::with_profile(
+            &egui::Context::default(),
+            Profile::default(),
+            None,
+            PathBuf::new(),
+            Game::new(1),
+        );
+        app.table.deal().unwrap();
+        app.table.dealer.clear();
+
+        app.execute(Command::Act(Action::Hit));
+
+        assert_eq!(
+            app.error.as_deref(),
+            Some("The game state is missing cards required for this action.")
         );
     }
 
