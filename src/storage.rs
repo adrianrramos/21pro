@@ -340,6 +340,35 @@ mod tests {
     }
 
     #[test]
+    fn current_profiles_without_insights_opened_still_load_and_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("profile.redb")).unwrap();
+        let mut profile = Profile::default();
+        profile.record_round(42, 3);
+        profile.record_attempt(situation(), Action::Stand, 100, StudyMode::Table);
+        let history = |profile: &Profile| {
+            serde_json::json!({
+                "rounds": &profile.rounds,
+                "attempts": &profile.attempts,
+                "reviews": &profile.reviews,
+            })
+        };
+        let expected_history = history(&profile);
+        let mut snapshot = serde_json::to_value(&profile).unwrap();
+        snapshot.as_object_mut().unwrap().remove("insights_opened");
+        raw_snapshot(&store, &serde_json::to_vec(&snapshot).unwrap());
+
+        let loaded = store.load().unwrap();
+        assert!(!loaded.insights_opened);
+        assert_eq!(history(&loaded), expected_history);
+
+        store.save(&loaded).unwrap();
+        let reloaded = store.load().unwrap();
+        assert!(!reloaded.insights_opened);
+        assert_eq!(history(&reloaded), expected_history);
+    }
+
+    #[test]
     fn negative_counting_completion_is_corruption() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("profile.redb")).unwrap();
