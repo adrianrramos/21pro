@@ -105,93 +105,101 @@ pub struct SuiteStats {
     pub longest_streak: u32,
     #[serde(default)]
     pub buckets: BTreeMap<GradeBucket, BucketStats>,
+    #[serde(default)]
+    pub current_attempts: u32,
+    #[serde(default)]
+    pub current_correct: u32,
+    #[serde(default)]
+    pub current_elapsed_secs: u64,
+    #[serde(default)]
+    pub current_buckets: BTreeMap<GradeBucket, BucketStats>,
 }
 
 impl SuiteStats {
     pub fn accuracy(&self) -> f32 {
-        if self.attempts == 0 {
-            1.0
-        } else {
-            self.correct as f32 / self.attempts as f32
-        }
+        accuracy(self.correct, self.attempts)
+    }
+
+    pub fn current_accuracy(&self) -> f32 {
+        accuracy(self.current_correct, self.current_attempts)
     }
 
     pub fn record(&mut self, bucket: GradeBucket, correct: bool) {
-        self.attempts = self.attempts.saturating_add(1);
-        self.correct = self.correct.saturating_add(u32::from(correct));
-        let bucket_stats = self.buckets.entry(bucket).or_default();
+        record_bucket(
+            &mut self.attempts,
+            &mut self.correct,
+            &mut self.longest_streak,
+            &mut self.current_streak,
+            &mut self.buckets,
+            bucket,
+            correct,
+        );
+        self.current_attempts = self.current_attempts.saturating_add(1);
+        self.current_correct = self.current_correct.saturating_add(u32::from(correct));
+        let bucket_stats = self.current_buckets.entry(bucket).or_default();
         bucket_stats.attempts = bucket_stats.attempts.saturating_add(1);
         bucket_stats.correct = bucket_stats.correct.saturating_add(u32::from(correct));
-        if correct {
-            self.current_streak = self.current_streak.saturating_add(1);
-            self.longest_streak = self.longest_streak.max(self.current_streak);
-        } else {
-            self.current_streak = 0;
-        }
+    }
+
+    pub fn reset_current(&mut self) {
+        self.current_attempts = 0;
+        self.current_correct = 0;
+        self.current_elapsed_secs = 0;
+        self.current_streak = 0;
+        self.current_buckets.clear();
+    }
+}
+
+fn accuracy(correct: u32, attempts: u32) -> f32 {
+    if attempts == 0 {
+        1.0
+    } else {
+        correct as f32 / attempts as f32
+    }
+}
+
+fn record_bucket(
+    attempts: &mut u32,
+    correct_count: &mut u32,
+    longest_streak: &mut u32,
+    current_streak: &mut u32,
+    buckets: &mut BTreeMap<GradeBucket, BucketStats>,
+    bucket: GradeBucket,
+    correct: bool,
+) {
+    *attempts = attempts.saturating_add(1);
+    *correct_count = correct_count.saturating_add(u32::from(correct));
+    let bucket_stats = buckets.entry(bucket).or_default();
+    bucket_stats.attempts = bucket_stats.attempts.saturating_add(1);
+    bucket_stats.correct = bucket_stats.correct.saturating_add(u32::from(correct));
+    if correct {
+        *current_streak = current_streak.saturating_add(1);
+        *longest_streak = (*longest_streak).max(*current_streak);
+    } else {
+        *current_streak = 0;
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ToolSettings {
-    pub decks: usize,
-    pub h17: bool,
-    pub das: bool,
-    pub rsa: bool,
-    pub surrender: bool,
-    pub enhc: bool,
-    pub es_vs_ten_only: bool,
+    /// Deck count used by the True Count drill.
+    pub true_count_decks: usize,
+    /// Selects the documented half-deck divisor for True Count.
     pub half_deck: bool,
+    /// Running-count checkpoint interval; `None` means the end-of-shoe prompt.
     pub count_every: Option<usize>,
-    pub deviations: bool,
-    pub expanded: bool,
-    pub speed_ms: u64,
-    pub notify_errors: bool,
-    pub ghost_seats: u8,
-    pub grade_bets: bool,
-    pub ramp: Vec<(i32, i32)>,
-    pub mispay: bool,
-    pub math: bool,
-    pub unusual_ghost: bool,
-    pub time_limit: Option<u8>,
-    pub noise: bool,
-    pub positive_shoe: bool,
+    /// True Count session timeout in seconds.
+    pub true_count_duration_secs: u64,
 }
 
 impl Default for ToolSettings {
     fn default() -> Self {
         Self {
-            decks: 6,
-            h17: true,
-            das: true,
-            rsa: true,
-            surrender: true,
-            enhc: false,
-            es_vs_ten_only: false,
+            true_count_decks: 2,
             half_deck: false,
             count_every: Some(5),
-            deviations: true,
-            expanded: false,
-            speed_ms: 800,
-            notify_errors: true,
-            ghost_seats: 0,
-            grade_bets: false,
-            ramp: vec![
-                (-2, 5),
-                (-1, 10),
-                (0, 25),
-                (1, 100),
-                (2, 200),
-                (3, 300),
-                (4, 400),
-                (5, 500),
-                (6, 600),
-            ],
-            mispay: false,
-            math: false,
-            unusual_ghost: false,
-            time_limit: None,
-            noise: false,
-            positive_shoe: false,
+            true_count_duration_secs: 90,
         }
     }
 }
@@ -471,21 +479,21 @@ impl RunningCountDrill {
         }
     }
 
-    pub fn start_round(&mut self) {
+    pub fn start_round(&mut self) -> Result<(), GameError> {
+        if self.shoe.len().saturating_sub(self.cursor) < 4 {
+            return Err(GameError::ShoeExhausted);
+        }
         self.exposed.clear();
         self.hole = None;
         for _ in 0..3 {
-            if let Some(card) = self.draw() {
-                self.exposed.push(card);
-            }
+            let card = self.draw().ok_or(GameError::ShoeExhausted)?;
+            self.exposed.push(card);
         }
-        self.hole = self.draw();
+        self.hole = Some(self.draw().ok_or(GameError::ShoeExhausted)?);
+        Ok(())
     }
-
     pub fn running_count(&self) -> i32 {
-        let mut cards = self.discard.clone();
-        cards.extend(self.exposed.iter().copied());
-        running_count(&cards)
+        running_count(&self.discard) + running_count(&self.exposed)
     }
 
     pub fn hidden_hole_count(&self) -> i32 {
@@ -657,7 +665,7 @@ impl TablePractice {
             let checkpoint = count_checkpoint(
                 self.rounds,
                 self.settings.count_every,
-                self.game.past_cut(),
+                self.past_cut(),
                 false,
             );
             self.rounds += 1;
@@ -665,9 +673,36 @@ impl TablePractice {
         }
         Ok(())
     }
+    pub fn act_and_grade(&mut self, action: Action) -> Result<DrillFeedback, GameError> {
+        let situation = self
+            .game
+            .situation()
+            .ok_or(GameError::InvalidState("no suite decision is pending"))?;
+        let true_count = truncated_true_count(
+            self.game.running_count(),
+            6,
+            self.game.discarded_count(),
+            self.settings.half_deck,
+        );
+        let (recommendation, source) = strategy::graded_action(
+            situation,
+            Some(true_count as f32),
+            strategy::core_index_plays(),
+        );
+        self.act(action)?;
+        Ok(DrillFeedback {
+            chosen: action,
+            expected: recommendation.action,
+            correct: action == recommendation.action,
+            source,
+        })
+    }
 
     pub fn expected_count(&self) -> i32 {
         self.game.running_count()
+    }
+    pub fn past_cut(&self) -> bool {
+        self.game.past_cut() || self.game.remaining_cards() <= 68
     }
 
     pub fn submit_count(&mut self, submitted: i32) -> bool {
@@ -700,6 +735,7 @@ pub struct AssessmentSession {
     pub attempts: u32,
     pub correct: u32,
     pub early_exit: bool,
+    seed: u64,
 }
 
 impl AssessmentSession {
@@ -711,6 +747,7 @@ impl AssessmentSession {
             attempts: 0,
             correct: 0,
             early_exit: false,
+            seed,
         }
     }
 
@@ -718,9 +755,27 @@ impl AssessmentSession {
         self.attempts = self.attempts.saturating_add(1);
         self.correct = self.correct.saturating_add(u32::from(correct));
     }
+    pub fn act_and_grade(&mut self, action: Action) -> Result<DrillFeedback, GameError> {
+        let feedback = self.table.act_and_grade(action)?;
+        self.record_answer(feedback.correct);
+        Ok(feedback)
+    }
 
-    pub fn finish_shoe(&mut self) {
-        self.shoes_completed = self.shoes_completed.saturating_add(1).min(self.shoe_limit);
+    /// Completes a shoe only after the table has reached its cut card.
+    pub fn finish_shoe(&mut self) -> bool {
+        if self.shoes_completed >= self.shoe_limit
+            || self.table.pending_count
+            || self.table.game.phase != Phase::Finished
+            || !self.table.past_cut()
+        {
+            return false;
+        }
+        self.shoes_completed += 1;
+        if self.shoes_completed < self.shoe_limit {
+            self.seed = self.seed.wrapping_add(1);
+            self.table = TablePractice::new(self.seed, self.table.settings.clone());
+        }
+        true
     }
 
     pub fn exit_early(&mut self) {
@@ -787,7 +842,7 @@ mod tests {
     #[test]
     fn running_count_excludes_hole_until_reveal() {
         let mut drill = RunningCountDrill::new(7, Some(1));
-        drill.start_round();
+        drill.start_round().unwrap();
         let before = drill.hidden_hole_count();
         let hole = drill.reveal_hole().expect("a four-card round has a hole");
         assert_eq!(
@@ -886,17 +941,58 @@ mod tests {
         assert_eq!(drill.info().cards, drill.cards.len());
     }
 
+    fn complete_assessment_shoe(session: &mut AssessmentSession) {
+        loop {
+            if session.table.pending_count {
+                let expected = session.table.expected_count();
+                assert!(session.table.submit_count(expected));
+                continue;
+            }
+            if matches!(session.table.game.phase, Phase::Ready | Phase::Finished) {
+                if session.table.past_cut() {
+                    break;
+                }
+                session.table.deal().unwrap();
+                continue;
+            }
+            let situation = session.table.game.situation().unwrap();
+            let action = if situation.kind == HandKind::Insurance {
+                Action::DeclineInsurance
+            } else {
+                Action::Stand
+            };
+            session.table.act(action).unwrap();
+        }
+        assert!(session.finish_shoe());
+    }
+
     #[test]
     fn assessment_requires_three_complete_shoes_and_zero_misses() {
         let mut session = AssessmentSession::new(1, ToolSettings::default());
+        assert!(!session.finish_shoe());
         session.record_answer(true);
-        session.finish_shoe();
-        session.finish_shoe();
+        complete_assessment_shoe(&mut session);
+        complete_assessment_shoe(&mut session);
         assert!(!session.report().passed);
-        session.finish_shoe();
+        complete_assessment_shoe(&mut session);
         assert!(session.report().passed);
+
         session.exit_early();
         assert!(!session.report().passed);
+    }
+    #[test]
+    fn current_stats_reset_without_losing_lifetime() {
+        let mut stats = SuiteStats::default();
+        stats.record(GradeBucket::Count, true);
+        stats.current_elapsed_secs = 12;
+        stats.reset_current();
+        assert_eq!(stats.attempts, 1);
+        assert_eq!(stats.correct, 1);
+        assert_eq!(stats.current_attempts, 0);
+        assert_eq!(stats.current_correct, 0);
+        assert_eq!(stats.current_elapsed_secs, 0);
+        assert_eq!(stats.buckets[&GradeBucket::Count].correct, 1);
+        assert!(stats.current_buckets.is_empty());
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! natural takes the full original bet. Insurance is a separate one-half-unit
 //! side bet paying two to one, not part of that main-bet loss cap.
 use crate::{
-    counting::running_count,
+    counting::hi_lo,
     model::{Action, Card, HandKind, Rank, Situation, Suit, hand_value},
 };
 use rand::{SeedableRng, rngs::SmallRng, seq::SliceRandom};
@@ -142,20 +142,25 @@ impl Game {
     /// Returns the exact Hi-Lo count of the discard tray and exposed layout.
     /// During a live round the dealer's second card is excluded.
     pub fn running_count(&self) -> i32 {
-        let mut cards = self.discarded.clone();
-        cards.extend(
-            self.hands
-                .iter()
-                .flat_map(|hand| hand.cards.iter().copied()),
-        );
-        cards.extend(
-            self.dealer
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| *index != 1 || matches!(self.phase, Phase::Finished))
-                .map(|(_, card)| *card),
-        );
-        running_count(&cards)
+        let discarded = self
+            .discarded
+            .iter()
+            .map(|card| i32::from(hi_lo(card.rank)))
+            .sum::<i32>();
+        let player_cards = self
+            .hands
+            .iter()
+            .flat_map(|hand| hand.cards.iter())
+            .map(|card| i32::from(hi_lo(card.rank)))
+            .sum::<i32>();
+        let dealer_cards = self
+            .dealer
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != 1 || matches!(self.phase, Phase::Finished))
+            .map(|(_, card)| i32::from(hi_lo(card.rank)))
+            .sum::<i32>();
+        discarded + player_cards + dealer_cards
     }
 
     pub fn discarded_count(&self) -> usize {

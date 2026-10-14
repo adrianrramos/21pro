@@ -314,7 +314,15 @@ impl Profile {
             .suite_stats
             .elapsed_secs
             .saturating_add(session.elapsed_secs);
+        self.suite_stats.current_elapsed_secs = self
+            .suite_stats
+            .current_elapsed_secs
+            .saturating_add(session.elapsed_secs);
         self.suite_sessions.push(session);
+    }
+
+    pub fn reset_suite_current_stats(&mut self) {
+        self.suite_stats.reset_current();
     }
 }
 

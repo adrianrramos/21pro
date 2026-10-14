@@ -709,13 +709,74 @@ impl TrainerApp {
         });
         ui.add_space(14.0);
         if self.suite.is_none() {
+            if let Some(report) = &self.suite_report {
+                w::panel().stroke(Stroke::new(1.0, w::GOLD)).show(ui, |ui| {
+                    ui.label(RichText::new(format!("{} report", report.tool.label())).strong());
+                    ui.label(format!(
+                        "{} / {} correct · {}s · {}",
+                        report.correct,
+                        report.attempts,
+                        report.elapsed_secs,
+                        if report.passed == Some(true) {
+                            "PASSED"
+                        } else {
+                            "NOT PASSED"
+                        }
+                    ));
+                    if !report.mistakes.is_empty() {
+                        ui.label(format!("Mistake buckets: {:?}", report.mistakes));
+                    }
+                });
+                ui.add_space(12.0);
+            }
             w::panel().show(ui, |ui| {
-                w::eyebrow(ui, "SUPPORTED RULESET");
-                ui.label(RichText::new("H17 · DAS · late surrender").size(22.0).strong());
+                ui.label(RichText::new("True Count settings").size(18.0).strong());
                 w::muted(
                     ui,
-                    "The suite uses the same local mechanics and strategy source as 21 Pro. Settings are local and do not alter The table.",
+                    "These settings are suite-local and do not change The table's six-deck rules.",
                 );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Decks:");
+                    for decks in [2, 4, 6, 8] {
+                        if ui
+                            .selectable_label(
+                                self.profile.suite_settings.true_count_decks == decks,
+                                decks.to_string(),
+                            )
+                            .clicked()
+                        {
+                            *command = Some(Command::SuiteSetTrueCountDecks(decks));
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Divisor:");
+                    for (half_deck, label) in [(false, "Whole deck"), (true, "½ deck")] {
+                        if ui
+                            .selectable_label(
+                                self.profile.suite_settings.half_deck == half_deck,
+                                label,
+                            )
+                            .clicked()
+                        {
+                            *command = Some(Command::SuiteSetHalfDeck(half_deck));
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Timer:");
+                    for seconds in [90, 150, 300, 600] {
+                        if ui
+                            .selectable_label(
+                                self.profile.suite_settings.true_count_duration_secs == seconds,
+                                format!("{seconds}s"),
+                            )
+                            .clicked()
+                        {
+                            *command = Some(Command::SuiteSetTrueCountDuration(seconds));
+                        }
+                    }
+                });
             });
             ui.add_space(12.0);
             for tool in ToolId::ALL {
@@ -745,10 +806,41 @@ impl TrainerApp {
             }
             w::panel().show(ui, |ui| {
                 ui.label(RichText::new("Training Stats").size(20.0).strong());
-                w::muted(ui, "Current and lifetime suite buckets are kept separate from Insights and the 250-round baseline.");
-                for bucket in GradeBucket::ALL {
-                    let stats = self.profile.suite_stats.buckets.get(&bucket).copied().unwrap_or_default();
-                    ui.label(format!("{}: {} / {}", bucket.label(), stats.correct, stats.attempts));
+                w::muted(
+                    ui,
+                    "Current and lifetime suite buckets are kept separate from Insights and the 250-round baseline.",
+                );
+                egui::Grid::new("suite-stats")
+                    .num_columns(3)
+                    .spacing(vec2(18.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.label("");
+                        ui.label("Current");
+                        ui.label("Lifetime");
+                        ui.end_row();
+                        for bucket in GradeBucket::ALL {
+                            let current = self
+                                .profile
+                                .suite_stats
+                                .current_buckets
+                                .get(&bucket)
+                                .copied()
+                                .unwrap_or_default();
+                            let lifetime = self
+                                .profile
+                                .suite_stats
+                                .buckets
+                                .get(&bucket)
+                                .copied()
+                                .unwrap_or_default();
+                            ui.label(bucket.label());
+                            ui.label(format!("{} / {}", current.correct, current.attempts));
+                            ui.label(format!("{} / {}", lifetime.correct, lifetime.attempts));
+                            ui.end_row();
+                        }
+                    });
+                if ui.button("Reset current stats").clicked() {
+                    *command = Some(Command::ResetSuiteCurrent);
                 }
             });
             return;
@@ -790,10 +882,9 @@ impl TrainerApp {
                     "The hole card joins the count only when it is revealed.",
                 );
                 ui.label(format!(
-                    "Round {} · {} cards seen · exact count {:+}",
+                    "Round {} · {} cards seen",
                     drill.rounds + 1,
-                    drill.exposed_cards(),
-                    drill.running_count()
+                    drill.exposed_cards()
                 ));
                 if drill.checkpoint.prompt {
                     ui.label("Enter the exact running count.");
@@ -894,10 +985,21 @@ impl TrainerApp {
                 if let Some(scenario) = drill.current() {
                     ui.label(scenario.situation.label());
                     Self::suite_actions(ui, scenario.situation, command);
+                    if let Some(action) = self.suite_selected_action {
+                        ui.label(format!("Selected action: {}", action.label()));
+                    } else {
+                        w::muted(ui, "Select an action, then enter its threshold.");
+                    }
                     ui.label("True-count threshold");
                     ui.text_edit_singleline(&mut self.suite_input);
-                    if ui.button("Submit index").clicked() {
-                        *command = Some(Command::SuiteAct(Action::Hit));
+                    if ui
+                        .add_enabled(
+                            self.suite_selected_action.is_some(),
+                            egui::Button::new("Submit index"),
+                        )
+                        .clicked()
+                    {
+                        *command = Some(Command::SuiteSubmit);
                     }
                 } else {
                     ui.label("Core Index Plays complete.");
@@ -977,9 +1079,13 @@ impl TrainerApp {
                     if w::primary(ui, "Deal assessment hand").clicked() {
                         *command = Some(Command::SuiteNext);
                     }
-                } else if session.table.game.phase == Phase::Finished {
+                } else if session.table.game.phase == Phase::Finished && session.table.past_cut() {
                     if ui.button("Complete current shoe").clicked() {
                         *command = Some(Command::SuiteCompleteShoe);
+                    }
+                } else if session.table.game.phase == Phase::Finished {
+                    if w::primary(ui, "Next assessment hand").clicked() {
+                        *command = Some(Command::SuiteNext);
                     }
                 } else if let Some(situation) = session.table.game.situation() {
                     Self::suite_actions(ui, situation, command);
