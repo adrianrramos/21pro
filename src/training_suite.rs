@@ -443,8 +443,8 @@ pub fn count_checkpoint(
         };
     }
     CountCheckpoint {
-        prompt: interval.is_none(),
-        final_count: final_shoe && interval.is_none(),
+        prompt: final_shoe || interval.is_none(),
+        final_count: final_shoe,
     }
 }
 

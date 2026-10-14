@@ -818,12 +818,14 @@ impl TrainerApp {
                 let input = self.suite_input.parse::<i32>().ok();
                 let selected_action = self.suite_selected_action.take();
                 let mut pressure_count_finished = false;
+                let mut running_count_finished = false;
                 let mut record = None;
                 if let Some(activity) = self.suite.as_mut() {
                     match activity {
                         SuiteActivity::RunningCount(drill) => {
                             if let Some(submitted) = input {
                                 let correct = submitted == drill.running_count();
+                                running_count_finished = drill.checkpoint.final_count;
                                 record = Some((GradeBucket::Count, correct));
                                 self.suite_message = Some(format!(
                                     "{} · expected {:+}",
@@ -928,6 +930,16 @@ impl TrainerApp {
                 }
                 if let Some((bucket, correct)) = record {
                     self.suite_record(bucket, correct);
+                }
+                if running_count_finished {
+                    let passed = self.suite_attempts == self.suite_correct;
+                    self.suite_finish(ToolId::RunningCount, Some(passed));
+                    self.suite = None;
+                    self.suite_message = Some(if passed {
+                        "Running Count report: PASSED.".to_owned()
+                    } else {
+                        "Running Count report: NOT PASSED.".to_owned()
+                    });
                 }
                 if pressure_count_finished && self.suite_pressure_prompt.is_none() {
                     self.begin_pressure_prompt();

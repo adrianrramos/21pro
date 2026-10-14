@@ -892,7 +892,7 @@ impl TrainerApp {
                     if w::primary(ui, "Submit count  [Enter]").clicked() {
                         *command = Some(Command::SuiteSubmit);
                     }
-                    if ui.button("Next round").clicked() {
+                    if !drill.checkpoint.final_count && ui.button("Next round").clicked() {
                         *command = Some(Command::SuiteNext);
                     }
                 } else if drill.rounds > 0 {

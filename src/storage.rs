@@ -168,6 +168,37 @@ fn validate(profile: &Profile) -> Result<(), StorageError> {
         });
     }
     let corrupt = |message: &str| StorageError::Corrupt(message.to_owned());
+    if !matches!(profile.suite_settings.true_count_decks, 2 | 4 | 6 | 8)
+        || !matches!(
+            profile.suite_settings.true_count_duration_secs,
+            90 | 150 | 300 | 600
+        )
+        || profile
+            .suite_settings
+            .count_every
+            .is_some_and(|interval| interval == 0)
+    {
+        return Err(corrupt("invalid Training Suite settings"));
+    }
+    if profile.suite_stats.correct > profile.suite_stats.attempts
+        || profile.suite_stats.current_correct > profile.suite_stats.current_attempts
+        || profile
+            .suite_stats
+            .buckets
+            .values()
+            .any(|stats| stats.correct > stats.attempts)
+        || profile
+            .suite_stats
+            .current_buckets
+            .values()
+            .any(|stats| stats.correct > stats.attempts)
+        || profile
+            .suite_sessions
+            .iter()
+            .any(|session| session.correct > session.attempts)
+    {
+        return Err(corrupt("invalid Training Suite statistics"));
+    }
     if profile.rounds.iter().any(|round| round.at < 0)
         || profile
             .counting_history
