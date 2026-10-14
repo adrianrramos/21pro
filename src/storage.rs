@@ -176,7 +176,7 @@ fn validate(profile: &Profile) -> Result<(), StorageError> {
         || profile
             .suite_settings
             .count_every
-            .is_some_and(|interval| interval == 0)
+            .is_some_and(|interval| !matches!(interval, 1 | 3 | 5 | 10 | 25))
     {
         return Err(corrupt("invalid Training Suite settings"));
     }

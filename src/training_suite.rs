@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use rand::{Rng, SeedableRng, rngs::SmallRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
     counting::{quarter_deck_alternate, running_count, true_count_divisor, truncated_true_count},
@@ -198,7 +199,7 @@ impl Default for ToolSettings {
         Self {
             true_count_decks: 2,
             half_deck: false,
-            count_every: Some(5),
+            count_every: Some(1),
             true_count_duration_secs: 90,
         }
     }
@@ -448,13 +449,14 @@ pub fn count_checkpoint(
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct RunningCountDrill {
     shoe: Vec<Card>,
     cursor: usize,
     discard: Vec<Card>,
     exposed: Vec<Card>,
     hole: Option<Card>,
+    last_round: [Card; 4],
+    last_round_len: usize,
     pub rounds: usize,
     pub checkpoint: CountCheckpoint,
     pub interval: Option<usize>,
@@ -470,6 +472,11 @@ impl RunningCountDrill {
             discard: Vec::new(),
             exposed: Vec::new(),
             hole: None,
+            last_round: [Card {
+                rank: Rank::Ace,
+                suit: Suit::Spades,
+            }; 4],
+            last_round_len: 0,
             rounds: 0,
             checkpoint: CountCheckpoint {
                 prompt: false,
@@ -500,6 +507,24 @@ impl RunningCountDrill {
         self.running_count()
     }
 
+    /// Cards currently visible on the felt before the hole is revealed.
+    pub fn visible_cards(&self) -> &[Card] {
+        &self.exposed
+    }
+
+    /// Cards from the most recently completed round, including the revealed hole.
+    pub fn last_round_cards(&self) -> &[Card] {
+        &self.last_round[..self.last_round_len]
+    }
+
+    pub fn hole_hidden(&self) -> bool {
+        self.hole.is_some()
+    }
+
+    pub fn discard_cards(&self) -> &[Card] {
+        &self.discard
+    }
+
     pub fn reveal_hole(&mut self) -> Option<Card> {
         let hole = self.hole.take()?;
         self.exposed.push(hole);
@@ -508,6 +533,9 @@ impl RunningCountDrill {
 
     pub fn finish_round(&mut self, final_shoe: bool) -> CountCheckpoint {
         self.reveal_hole();
+        self.last_round_len = self.exposed.len().min(self.last_round.len());
+        self.last_round[..self.last_round_len]
+            .copy_from_slice(&self.exposed[..self.last_round_len]);
         self.discard.append(&mut self.exposed);
         let checkpoint = count_checkpoint(self.rounds, self.interval, self.past_cut(), final_shoe);
         self.rounds += 1;
@@ -515,6 +543,14 @@ impl RunningCountDrill {
         checkpoint
     }
 
+    pub fn submit_count(&mut self, submitted: i32) -> bool {
+        if !self.checkpoint.prompt {
+            return false;
+        }
+        let correct = submitted == self.running_count();
+        self.checkpoint.prompt = false;
+        correct
+    }
     pub fn exposed_cards(&self) -> usize {
         self.discard.len() + self.exposed.len() + usize::from(self.hole.is_some())
     }
@@ -529,6 +565,15 @@ impl RunningCountDrill {
         self.cursor += 1;
         Some(card)
     }
+}
+
+/// Invalid configuration supplied to the True Count drill constructor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum TrueCountError {
+    #[error("True Count supports 2, 4, 6, or 8 decks.")]
+    InvalidDeckCount,
+    #[error("True Count duration must be greater than zero.")]
+    InvalidDuration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -560,7 +605,18 @@ pub struct TrueCountDrill {
 }
 
 impl TrueCountDrill {
-    pub fn new(seed: u64, decks: usize, half_deck: bool, duration_secs: u64) -> Self {
+    pub fn new(
+        seed: u64,
+        decks: usize,
+        half_deck: bool,
+        duration_secs: u64,
+    ) -> Result<Self, TrueCountError> {
+        if !matches!(decks, 2 | 4 | 6 | 8) {
+            return Err(TrueCountError::InvalidDeckCount);
+        }
+        if duration_secs == 0 {
+            return Err(TrueCountError::InvalidDuration);
+        }
         let mut rng = SmallRng::seed_from_u64(seed);
         loop {
             let mut shoe = standard_shoe(decks);
@@ -571,17 +627,26 @@ impl TrueCountDrill {
             let running_count = running_count(&cards);
             let answer = truncated_true_count(running_count, decks, cards.len(), half_deck);
             if running_count != 0 && answer != 0 {
-                return Self {
+                return Ok(Self {
                     decks,
                     half_deck,
                     duration_secs,
-                    angle: 1,
+                    angle: 0,
                     cards,
                     running_count,
                     feedback: None,
-                };
+                });
             }
         }
+    }
+
+    pub fn turn_angle(&mut self, direction: i8) {
+        self.angle = match direction {
+            -1 if self.angle == 0 => 2,
+            -1 => self.angle - 1,
+            1 => (self.angle + 1) % 3,
+            _ => self.angle,
+        };
     }
 
     pub fn answer(&self) -> i32 {
@@ -718,7 +783,116 @@ impl TablePractice {
     }
 }
 
+/// The current state of the optional pressure-table ghost seat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GhostSeat {
+    pub occupied: bool,
+    pub changed: bool,
+    pub situation: Option<Situation>,
+    pub action: Option<Action>,
+}
+
+/// A deterministic expected-versus-paid settlement mismatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mispay {
+    pub expected_half_units: i32,
+    pub paid_half_units: i32,
+}
+
+/// A table-practice session with state-backed distractions and event grading.
+#[derive(Debug, Clone)]
+pub struct PressureTable {
+    pub table: TablePractice,
+    pub ghost: GhostSeat,
+    pub mispay: Option<Mispay>,
+    seed: u64,
+}
+
+impl PressureTable {
+    pub const DECISION_LIMIT_SECS: u8 = 5;
+
+    pub fn new(seed: u64, settings: ToolSettings) -> Self {
+        Self {
+            table: TablePractice::new(seed, settings),
+            ghost: GhostSeat {
+                occupied: true,
+                changed: false,
+                situation: None,
+                action: None,
+            },
+            mispay: None,
+            seed,
+        }
+    }
+
+    pub fn deal(&mut self) -> Result<(), GameError> {
+        self.table.deal()?;
+        self.ghost.changed = self.table.rounds > 0 && self.table.rounds.is_multiple_of(3);
+        if self.ghost.changed {
+            self.ghost.occupied = !self.ghost.occupied;
+        }
+        self.seed = self.seed.wrapping_add(1);
+        if !self.ghost.occupied {
+            self.ghost.situation = None;
+            self.ghost.action = None;
+            return Ok(());
+        }
+        let mut ghost_game = Game::new(self.seed);
+        ghost_game.deal()?;
+        self.ghost.situation = ghost_game.situation();
+        self.ghost.action = self.ghost.situation.map(|situation| {
+            if situation.kind == HandKind::Insurance {
+                Action::DeclineInsurance
+            } else {
+                strategy::recommendation(situation).action
+            }
+        });
+        Ok(())
+    }
+
+    pub fn act_and_grade(&mut self, action: Action) -> Result<DrillFeedback, GameError> {
+        let feedback = self.table.act_and_grade(action)?;
+        if self.table.game.phase == Phase::Finished {
+            self.mispay = self
+                .table
+                .game
+                .result
+                .as_ref()
+                .filter(|result| self.table.rounds.is_multiple_of(5) && result.net_half_units != 0)
+                .map(|result| Mispay {
+                    expected_half_units: result.net_half_units,
+                    paid_half_units: result.net_half_units
+                        + if result.net_half_units > 0 { -1 } else { 1 },
+                });
+        }
+        Ok(feedback)
+    }
+
+    pub fn resolve_mispay(&mut self) {
+        self.mispay = None;
+    }
+
+    pub fn resolve_ghost_change(&mut self) {
+        self.ghost.changed = false;
+    }
+
+    pub fn pending_count(&self) -> bool {
+        self.table.pending_count
+    }
+
+    pub fn submit_count(&mut self, submitted: i32) -> bool {
+        self.table.submit_count(submitted)
+    }
+
+    pub fn expected_count(&self) -> i32 {
+        self.table.expected_count()
+    }
+
+    pub fn past_cut(&self) -> bool {
+        self.table.past_cut()
+    }
+}
+
 pub struct AssessmentReport {
     pub shoes_completed: u8,
     pub attempts: u32,
@@ -820,6 +994,88 @@ pub fn pressure_answer(prompt: PressurePrompt, answer: i32) -> bool {
             elapsed_secs,
         } => elapsed_secs <= limit_secs,
         PressurePrompt::GhostChange { occupied } => answer == i32::from(occupied),
+    }
+}
+
+/// Build deterministic local card faces for a strategy situation.
+pub fn representative_cards(situation: Situation, card_count: u8) -> ([Card; 4], usize, Card) {
+    let count = usize::from(card_count.clamp(2, 4));
+    let mut cards = [Card {
+        rank: Rank::Two,
+        suit: Suit::Hearts,
+    }; 4];
+    let player_suits = [Suit::Hearts, Suit::Clubs, Suit::Diamonds, Suit::Spades];
+    let dealer = Card {
+        rank: rank_for_value(situation.dealer),
+        suit: Suit::Diamonds,
+    };
+    match situation.kind {
+        HandKind::Pair => {
+            let rank = rank_for_value(situation.value);
+            cards[0] = Card {
+                rank,
+                suit: player_suits[0],
+            };
+            cards[1] = Card {
+                rank,
+                suit: player_suits[1],
+            };
+        }
+        HandKind::Soft => {
+            cards[0] = Card {
+                rank: Rank::Ace,
+                suit: player_suits[0],
+            };
+            cards[1] = Card {
+                rank: rank_for_value(situation.value.saturating_sub(11).max(2)),
+                suit: player_suits[1],
+            };
+            for (index, suit) in player_suits.iter().enumerate().skip(2).take(count - 2) {
+                cards[index] = Card {
+                    rank: Rank::Two,
+                    suit: *suit,
+                };
+            }
+        }
+        HandKind::Hard | HandKind::Insurance => {
+            let first = if situation.kind == HandKind::Insurance {
+                10
+            } else {
+                situation.value.saturating_sub(2).min(10)
+            };
+            let second = situation.value.saturating_sub(first).clamp(2, 11);
+            cards[0] = Card {
+                rank: rank_for_value(first),
+                suit: player_suits[0],
+            };
+            cards[1] = Card {
+                rank: rank_for_value(second),
+                suit: player_suits[1],
+            };
+            for (index, suit) in player_suits.iter().enumerate().skip(2).take(count - 2) {
+                cards[index] = Card {
+                    rank: Rank::Two,
+                    suit: *suit,
+                };
+            }
+        }
+    }
+    (cards, count, dealer)
+}
+
+fn rank_for_value(value: u8) -> Rank {
+    match value {
+        2 => Rank::Two,
+        3 => Rank::Three,
+        4 => Rank::Four,
+        5 => Rank::Five,
+        6 => Rank::Six,
+        7 => Rank::Seven,
+        8 => Rank::Eight,
+        9 => Rank::Nine,
+        10 => Rank::Ten,
+        11 => Rank::Ace,
+        _ => Rank::Two,
     }
 }
 
@@ -934,11 +1190,75 @@ mod tests {
 
     #[test]
     fn true_count_accepts_only_documented_alternate() {
-        let mut drill = TrueCountDrill::new(42, 2, false, 90);
+        let mut drill = TrueCountDrill::new(42, 2, false, 90).unwrap();
         let expected = drill.answer();
         let feedback = drill.submit(expected);
         assert!(feedback.correct);
         assert_eq!(drill.info().cards, drill.cards.len());
+    }
+
+    #[test]
+    fn true_count_rejects_unsupported_inputs_and_rotates_tray_angle() {
+        assert!(matches!(
+            TrueCountDrill::new(42, 0, false, 90),
+            Err(TrueCountError::InvalidDeckCount)
+        ));
+        assert!(matches!(
+            TrueCountDrill::new(42, 2, false, 0),
+            Err(TrueCountError::InvalidDuration)
+        ));
+        let mut drill = TrueCountDrill::new(42, 2, false, 90).unwrap();
+        assert_eq!(drill.angle, 0);
+        drill.turn_angle(-1);
+        assert_eq!(drill.angle, 2);
+        drill.turn_angle(1);
+        assert_eq!(drill.angle, 0);
+    }
+
+    #[test]
+    fn pressure_table_exposes_ghost_state_from_a_real_deal() {
+        let mut table = PressureTable::new(11, ToolSettings::default());
+        table.deal().unwrap();
+        assert!(table.ghost.occupied);
+        assert!(table.ghost.situation.is_some());
+        assert!(table.ghost.action.is_some());
+        assert_eq!(table.table.game.phase, Phase::Playing);
+    }
+
+    #[test]
+    fn pressure_table_generates_a_payout_audit_from_settlement() {
+        let mut table = PressureTable::new(11, ToolSettings::default());
+        let mut found = false;
+        for _ in 0..20 {
+            table.deal().unwrap();
+            while let Some(situation) = table.table.game.situation() {
+                let action = if situation.kind == HandKind::Insurance {
+                    Action::DeclineInsurance
+                } else {
+                    Action::Stand
+                };
+                table.act_and_grade(action).unwrap();
+            }
+            if table.mispay.is_some() {
+                found = true;
+                break;
+            }
+            if table.pending_count() {
+                let expected = table.expected_count();
+                assert!(table.submit_count(expected));
+            }
+        }
+        assert!(found);
+    }
+
+    #[test]
+    fn running_count_checkpoint_is_consumed_after_submission() {
+        let mut drill = RunningCountDrill::new(7, Some(1));
+        drill.start_round().unwrap();
+        let checkpoint = drill.finish_round(false);
+        assert!(checkpoint.prompt);
+        assert!(drill.submit_count(drill.running_count()));
+        assert!(!drill.checkpoint.prompt);
     }
 
     fn complete_assessment_shoe(session: &mut AssessmentSession) {

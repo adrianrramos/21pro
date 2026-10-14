@@ -17,11 +17,11 @@ Every shipped threshold and comparator was independently checked against both so
 1. Wizard of Odds, *Blackjack Card Counting* and index-play discussion: <https://wizardofodds.com/games/blackjack/card-counting/>
 2. QFIT / Norm Wattenberger, *The Illustrious 18 and Fab 4*: <https://www.qfit.com/book/modern-blackjack-illustrious-18.htm>
 
-The sources agree on the standard Hi-Lo thresholds used here: insurance +3; the hard-total I18 rows for 9–16 and 10/A matchups; and Fab 4 surrender thresholds for 14 vs 9, 14 vs ace, 14 vs 10, and 15 vs 10. No unresolved threshold differences remained for this ruleset. Expanded deviations, ENHC, S17, and arbitrary deck variants are intentionally not selectable.
+The shipped set is exactly insurance +3; I18 hard plays 16v10 +0, 15v10 +4, 10v10 +4, 12v3 +2, 12v2 +3, 11vA +1, 9v2 +1, 10vA +4, 9v7 +3, 16v9 +5, 13v2 -1, 12v4 +0, 12v5 -2, 12v6 -1, 13v3 -2, 15v9 +2, and 16v8 +4; and Fab 4 surrender plays 14v9 +5, 14vA +3, 14v10 +3, and 15v10 +0. No pair-10 rows are included. Expanded deviations, ENHC, S17, and arbitrary deck variants are intentionally not selectable.
 
 ## Scope notes
 
 - Running Count excludes a face-down hole until reveal and uses exact integer grading.
 - True Count uses stepped whole/half-deck divisors, truncation toward zero, and the documented quarter-deck alternate.
 - Assessment is a local three-shoe suite session and is distinct from the existing 250-round baseline assessment.
-- Pressure Table uses deterministic local prompts for timing, math, mispay, and unusual ghost behavior; no network, account, analytics, or vendor assets are involved.
+- Pressure Table derives ghost-seat occupancy/actions, payout mismatch values, and a five-second decision clock from the local table state; prompts are not synthetic rotations of unrelated booleans.

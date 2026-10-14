@@ -1,10 +1,11 @@
 //! Simulated input against the real eframe app; no renderer or process-global test state.
-use super::{Page, TrainerApp, fixtures::Fixture};
+use super::{Command, Page, TrainerApp, fixtures::Fixture};
 use eframe::egui::{Key, accesskit::Role, vec2};
 use egui_kittest::{
     Harness,
     kittest::{NodeT, Queryable},
 };
+use twenty_one_pro::training_suite::ToolId;
 
 type AppHarness = Harness<'static, TrainerApp>;
 
@@ -193,4 +194,103 @@ fn counting_trial_from_fixture_is_assessed_without_advancing_table_baseline() {
     click(&mut harness, "02   Your insights");
     harness.get_by_label("0 / 250 rounds");
     assert!(harness.query_by_label("Start focused practice").is_none());
+}
+
+fn active_suite(tool: ToolId) -> AppHarness {
+    Harness::builder()
+        .with_size(vec2(1180.0, 860.0))
+        .build_eframe(move |cc| {
+            let mut app = TrainerApp::fixture(&cc.egui_ctx, Fixture::TrainingSuite).unwrap();
+            app.suite_seed = 7;
+            app.execute(Command::StartSuite(tool));
+            app
+        })
+}
+
+#[test]
+fn training_suite_menu_exposes_cards_settings_and_current_lifetime_stats() {
+    let harness = fixture(Fixture::TrainingSuite);
+    assert!(
+        harness
+            .query_all_by_label("CURRENT ACCURACY")
+            .next()
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_all_by_label("LIFETIME ACCURACY")
+            .next()
+            .is_some()
+    );
+    harness.get_by_label("End of shoe");
+    harness.get_by_label("Every 1");
+    harness.get_by_label("Training Stats");
+    harness.get_by_label("Start Running Count");
+    harness.get_by_label("Start True Count");
+}
+
+#[test]
+fn running_count_active_surface_shows_real_cards_and_discard_state() {
+    let harness = active_suite(ToolId::RunningCount);
+    harness.get_by_label("DEALER");
+    assert!(
+        harness
+            .query_all_by_label_contains("Cards:")
+            .next()
+            .is_some()
+    );
+    harness.get_by_label("DISCARD TRAY");
+    harness.get_by_label("COUNT STATE");
+    harness.get_by_label("Reveal hole and finish round");
+}
+
+#[test]
+fn true_count_active_surface_exposes_tray_angles_and_answer_card() {
+    let mut harness = active_suite(ToolId::TrueCount);
+    harness.get_by_label("DISCARD TRAY");
+    harness.get_by_label("TRAY ANGLE");
+    harness.get_by_label("ENTER THE TRUE COUNT");
+    harness.get_by_label("›").click();
+    harness.run_steps(2);
+}
+
+#[test]
+fn basic_strategy_active_surface_shows_cards_and_actions() {
+    let harness = active_suite(ToolId::BasicStrategy);
+    harness.get_by_label("DEALER");
+    harness.get_by_label("DECISION CARD");
+    harness.get_by_label("Hit [H]");
+}
+
+#[test]
+fn core_index_active_surface_shows_cards_and_threshold_input() {
+    let harness = active_suite(ToolId::CoreIndexPlays);
+    harness.get_by_label("DEALER");
+    harness.get_by_label("INDEX DECISION");
+    harness.get_by_label("True-count threshold");
+}
+
+#[test]
+fn pressure_table_active_surface_shows_ghost_and_decision_clock() {
+    let harness = active_suite(ToolId::PressureTable);
+    harness.get_by_label("PRESSURE FEED");
+    harness.get_by_label("Ghost seat occupied");
+    harness.get_by_label_contains("Decision clock");
+    harness.get_by_label("Hit [H]");
+}
+
+#[test]
+fn ending_a_suite_session_records_incomplete_without_a_finished_report() {
+    let ctx = eframe::egui::Context::default();
+    let mut app = TrainerApp::fixture(&ctx, Fixture::TrainingSuite).unwrap();
+    app.execute(Command::StartSuite(ToolId::RunningCount));
+    app.execute(Command::SuiteEnd);
+    assert!(app.suite_report.is_none());
+    let session = app
+        .profile
+        .suite_sessions
+        .last()
+        .expect("session is persisted");
+    assert!(!session.finished);
+    assert_eq!(session.passed, None);
 }

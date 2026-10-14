@@ -252,9 +252,13 @@ pub fn counting_card(ui: &mut egui::Ui, card: Card) {
     paint_card(ui, rect, Some(card));
 }
 fn cards(ui: &mut egui::Ui, cards: &[Card], hide_hole: bool) {
+    cards_with_size(ui, cards, hide_hole, vec2(52.0, 74.0));
+}
+
+fn cards_with_size(ui: &mut egui::Ui, cards: &[Card], hide_hole: bool, card_size: Vec2) {
     let count = cards.len().max(2);
-    let card_size = vec2(52.0, 74.0);
-    let step = ((ui.available_width() - card_size.x) / (count - 1) as f32).clamp(12.0, 60.0);
+    let step = ((ui.available_width() - card_size.x) / (count - 1) as f32)
+        .clamp(card_size.x * 0.32, card_size.x * 0.9);
     let width = card_size.x + step * (count - 1) as f32;
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), card_size.y), Sense::hover());
@@ -286,6 +290,67 @@ fn cards(ui: &mut egui::Ui, cards: &[Card], hide_hole: bool) {
             card,
         );
     }
+}
+
+pub fn suite_table(
+    ui: &mut egui::Ui,
+    dealer: &[Card],
+    player: &[Card],
+    hide_hole: bool,
+    footer: &str,
+) {
+    egui::Frame::NONE
+        .fill(FELT)
+        .corner_radius(16)
+        .inner_margin(18)
+        .stroke(Stroke::new(1.0, Color32::from_rgb(52, 82, 72)))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("DEALER").size(11.0).color(GREEN).strong());
+                cards_with_size(ui, dealer, hide_hole, vec2(82.0, 116.0));
+                muted(ui, "Dealer hole card hidden");
+            });
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(10.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("YOUR HAND").size(11.0).color(GREEN).strong());
+                cards_with_size(ui, player, false, vec2(82.0, 116.0));
+                muted(ui, footer);
+            });
+        });
+}
+
+pub fn discard_tray(ui: &mut egui::Ui, cards: &[Card], angle: u8) {
+    panel().inner_margin(12).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            eyebrow(ui, "DISCARD TRAY");
+            muted(ui, format!("{} cards · angle {}", cards.len(), angle + 1));
+        });
+        let window = cards.len().min(6);
+        let start = match angle {
+            0 => cards.len().saturating_sub(window),
+            1 => cards.len().saturating_sub(window + 4) / 2,
+            _ => 0,
+        };
+        ui.horizontal(|ui| {
+            for card in cards.iter().skip(start).take(window) {
+                let (rect, response) = ui.allocate_exact_size(vec2(42.0, 60.0), Sense::hover());
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Image,
+                        true,
+                        format!("{:?} of {:?}", card.rank, card.suit),
+                    )
+                });
+                paint_card(ui, rect, Some(*card));
+            }
+            if cards.is_empty() {
+                muted(ui, "No exposed cards yet");
+            }
+        });
+    });
 }
 
 pub fn game_table(ui: &mut egui::Ui, game: &Game) {

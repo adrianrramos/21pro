@@ -32,6 +32,7 @@ pub(super) enum Fixture {
     TableFeedback,
     Insights,
     Practice,
+    TrainingSuite,
     Rules,
 }
 
@@ -45,9 +46,10 @@ impl FromStr for Fixture {
             "table-feedback" => Ok(Self::TableFeedback),
             "insights" => Ok(Self::Insights),
             "practice" => Ok(Self::Practice),
+            "training-suite" => Ok(Self::TrainingSuite),
             "rules" => Ok(Self::Rules),
             _ => Err(
-                "Unknown visual fixture; choose table-ready, table-opening, table-feedback, insights, practice, or rules",
+                "Unknown visual fixture; choose table-ready, table-opening, table-feedback, insights, practice, training-suite, or rules",
             ),
         }
     }
@@ -110,6 +112,7 @@ impl TrainerApp {
             Fixture::Practice => {
                 app.execute(Command::StartPractice(app.profile.practice_queue(NOW, 12)));
             }
+            Fixture::TrainingSuite => app.page = Page::TrainingSuite,
             Fixture::Rules => app.page = Page::Rules,
         }
         if let Some(error) = app.error.take() {
