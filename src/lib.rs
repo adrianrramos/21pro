@@ -5,3 +5,4 @@ pub mod model;
 pub mod storage;
 pub mod strategy;
 pub mod training;
+pub mod training_suite;

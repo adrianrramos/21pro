@@ -6,7 +6,10 @@
 //! two half-units on the main bet. Late surrender is conditional: a dealer
 //! natural takes the full original bet. Insurance is a separate one-half-unit
 //! side bet paying two to one, not part of that main-bet loss cap.
-use crate::model::{Action, Card, HandKind, Rank, Situation, Suit, hand_value};
+use crate::{
+    counting::running_count,
+    model::{Action, Card, HandKind, Rank, Situation, Suit, hand_value},
+};
 use rand::{SeedableRng, rngs::SmallRng, seq::SliceRandom};
 
 const BASE_BET: i32 = 2;
@@ -88,6 +91,7 @@ pub struct Game {
     pub phase: Phase,
     pub result: Option<RoundResult>,
     shoe: Vec<Card>,
+    discarded: Vec<Card>,
     rng: SmallRng,
     insured: bool,
     // Practice may reserve prior split capacity without inventing extra hands.
@@ -103,6 +107,7 @@ impl Game {
             phase: Phase::Ready,
             result: None,
             shoe: Vec::with_capacity(312),
+            discarded: Vec::with_capacity(312),
             rng: SmallRng::seed_from_u64(seed),
             insured: false,
             splits_used: 0,
@@ -113,6 +118,7 @@ impl Game {
 
     fn shuffle(&mut self) {
         self.shoe.clear();
+        self.discarded.clear();
         for _ in 0..6 {
             for suit in Suit::ALL {
                 for rank in Rank::ALL {
@@ -133,9 +139,54 @@ impl Game {
         self.shoe.len()
     }
 
+    /// Returns the exact Hi-Lo count of the discard tray and exposed layout.
+    /// During a live round the dealer's second card is excluded.
+    pub fn running_count(&self) -> i32 {
+        let mut cards = self.discarded.clone();
+        cards.extend(
+            self.hands
+                .iter()
+                .flat_map(|hand| hand.cards.iter().copied()),
+        );
+        cards.extend(
+            self.dealer
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != 1 || matches!(self.phase, Phase::Finished))
+                .map(|(_, card)| *card),
+        );
+        running_count(&cards)
+    }
+
+    pub fn discarded_count(&self) -> usize {
+        self.discarded.len()
+            + if self.phase == Phase::Finished {
+                self.dealer.len()
+                    + self
+                        .hands
+                        .iter()
+                        .map(|hand| hand.cards.len())
+                        .sum::<usize>()
+            } else {
+                0
+            }
+    }
+
+    pub fn past_cut(&self) -> bool {
+        312usize.saturating_sub(self.discarded_count()) < 52
+    }
+
     pub fn deal(&mut self) -> Result<(), GameError> {
         if matches!(self.phase, Phase::Insurance | Phase::Playing) {
             return Err(GameError::RoundInProgress);
+        }
+        if self.phase == Phase::Finished {
+            self.discarded.extend(self.dealer.iter().copied());
+            self.discarded.extend(
+                self.hands
+                    .iter()
+                    .flat_map(|hand| hand.cards.iter().copied()),
+            );
         }
         if self.shoe.len() <= CUT_CARD {
             self.shuffle();
@@ -207,7 +258,7 @@ impl Game {
     }
 
     pub fn act(&mut self, action: Action) -> Result<(), GameError> {
-        if self.phase == Phase::Playing && self.dealer.first().is_none() {
+        if self.phase == Phase::Playing && self.dealer.is_empty() {
             return Err(GameError::InvalidState("the dealer upcard is missing"));
         }
         let situation = self.situation().ok_or(GameError::NoActiveDecision)?;

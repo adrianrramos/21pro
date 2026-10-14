@@ -270,6 +270,20 @@ References: [Microsoft WSL GUI support](https://learn.microsoft.com/en-us/window
 5. **Card counting:** open the Card counting tab for a 52-card Hi-Lo trial from a freshly shuffled six-deck shoe. The final running count is checked after timing stops; only correct trials are saved, with the fastest history first.
 6. **Repeat over time:** mistakes enter a local spaced-repetition schedule. Due correct answers earn longer intervals; errors return sooner. History and due dates survive closing the app.
 
+## Training Suite
+
+The **Training Suite** is a separate top-level tab for offline counting and decision practice. It uses the current H17, DAS, late-surrender ruleset and keeps suite attempts out of the existing table heatmap and 250-round baseline.
+
+- **Running Count:** exact Hi-Lo checks; a face-down hole card is excluded until reveal.
+- **True Count:** discard-tray estimates with stepped whole- or half-deck divisors, truncation toward zero, and the documented quarter-deck alternate.
+- **Basic Strategy:** generated hard, soft, pair, and multi-card situations graded by the local strategy function.
+- **Core Index Plays:** project-owned Illustrious 18 plus Fab 4 threshold practice, including insurance and strict comparator support.
+- **Table Practice:** self-paced table play with suite-only count checkpoints.
+- **Assessment:** a local three-shoe session that passes only with zero misses.
+- **Pressure Table:** table play with local math, timing, mispay, and ghost-change prompts.
+
+Training Suite settings, summaries, streaks, elapsed time, and mistake buckets are stored in the player profile. Existing profile data migrates without resetting rounds, decisions, reviews, or card-counting history. Index provenance and the selected ruleset are documented in [`docs/training-suite.md`](docs/training-suite.md).
+
 ### Controls
 
 | Key | Action |

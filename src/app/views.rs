@@ -1,13 +1,14 @@
 use std::time::Duration;
 
-use super::{Command, Page, TrainerApp, widgets as w};
+use super::{Command, Page, SuiteActivity, TrainerApp, widgets as w};
 use eframe::egui::{self, RichText, Stroke, vec2};
 use twenty_one_pro::{
     counting::TRIAL_SIZE,
     game::Phase,
-    model::{ASSESSMENT_ROUNDS, HandKind},
+    model::{ASSESSMENT_ROUNDS, Action, HandKind},
     strategy,
     training::StudyMode,
+    training_suite::{GradeBucket, ToolId},
 };
 
 fn format_duration(duration: Duration) -> String {
@@ -67,7 +68,8 @@ impl TrainerApp {
                     (Page::Insights, "02", "Your insights"),
                     (Page::Practice, "03", "Practice"),
                     (Page::Counting, "04", "Card counting"),
-                    (Page::Rules, "05", "Rules"),
+                    (Page::TrainingSuite, "05", "Training Suite"),
+                    (Page::Rules, "06", "Rules"),
                 ] {
                     let selected = self.page == page;
                     let label = format!("{number}   {title}");
@@ -645,6 +647,346 @@ impl TrainerApp {
                     });
             }
         });
+    }
+
+    fn suite_actions(
+        ui: &mut egui::Ui,
+        situation: twenty_one_pro::model::Situation,
+        command: &mut Option<Command>,
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            for action in [
+                Action::Hit,
+                Action::Split,
+                Action::Stand,
+                Action::Double,
+                Action::Surrender,
+                Action::Insure,
+                Action::DeclineInsurance,
+            ] {
+                if situation.allows(action)
+                    && ui
+                        .button(format!("{} [{}]", action.label(), action.short()))
+                        .clicked()
+                {
+                    *command = Some(Command::SuiteAct(action));
+                }
+            }
+        });
+    }
+
+    pub(super) fn training_suite_view(&mut self, ui: &mut egui::Ui, command: &mut Option<Command>) {
+        w::heading(
+            ui,
+            "Training Suite",
+            "Offline drills for counting, decisions, table control, and pressure.",
+        );
+        ui.columns(4, |columns| {
+            w::metric(
+                &mut columns[0],
+                "SUITE ACCURACY",
+                &format!("{:.0}%", self.profile.suite_stats.accuracy() * 100.0),
+                "Suite attempts only",
+            );
+            w::metric(
+                &mut columns[1],
+                "CURRENT STREAK",
+                &self.profile.suite_stats.current_streak.to_string(),
+                "Across graded answers",
+            );
+            w::metric(
+                &mut columns[2],
+                "LONGEST STREAK",
+                &self.profile.suite_stats.longest_streak.to_string(),
+                "Persisted locally",
+            );
+            w::metric(
+                &mut columns[3],
+                "SUITE TIME",
+                &format!("{}s", self.profile.suite_stats.elapsed_secs),
+                "Completed sessions",
+            );
+        });
+        ui.add_space(14.0);
+        if self.suite.is_none() {
+            w::panel().show(ui, |ui| {
+                w::eyebrow(ui, "SUPPORTED RULESET");
+                ui.label(RichText::new("H17 · DAS · late surrender").size(22.0).strong());
+                w::muted(
+                    ui,
+                    "The suite uses the same local mechanics and strategy source as 21 Pro. Settings are local and do not alter The table.",
+                );
+            });
+            ui.add_space(12.0);
+            for tool in ToolId::ALL {
+                w::panel().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(tool.label()).size(20.0).strong());
+                            w::muted(
+                                ui,
+                                match tool {
+                                    ToolId::RunningCount => "Exact Hi-Lo count with a hidden-hole checkpoint.",
+                                    ToolId::TrueCount => "Estimate truncated true count from a discard tray.",
+                                    ToolId::BasicStrategy => "One-decision situations from the local chart.",
+                                    ToolId::CoreIndexPlays => "Threshold and comparator practice for local indexes.",
+                                    ToolId::TablePractice => "Self-paced table play with count checks.",
+                                    ToolId::Assessment => "Three local shoes; pass requires exact perfection.",
+                                    ToolId::PressureTable => "Table play with local math, timing, mispay, and ghost prompts.",
+                                },
+                            );
+                        });
+                        if w::primary(ui, "Start").clicked() {
+                            *command = Some(Command::StartSuite(tool));
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+            }
+            w::panel().show(ui, |ui| {
+                ui.label(RichText::new("Training Stats").size(20.0).strong());
+                w::muted(ui, "Current and lifetime suite buckets are kept separate from Insights and the 250-round baseline.");
+                for bucket in GradeBucket::ALL {
+                    let stats = self.profile.suite_stats.buckets.get(&bucket).copied().unwrap_or_default();
+                    ui.label(format!("{}: {} / {}", bucket.label(), stats.correct, stats.attempts));
+                }
+            });
+            return;
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Training Suite menu").clicked() {
+                *command = Some(Command::SuiteEnd);
+            }
+            if ui.button("End session").clicked() {
+                *command = Some(Command::SuiteEnd);
+            }
+            if let Some(started) = self.suite_started_at {
+                ui.label(format!("Elapsed: {}", format_duration(started.elapsed())));
+            }
+            ui.label(format!(
+                "{} / {} · {:.0}%",
+                self.suite_correct,
+                self.suite_attempts,
+                if self.suite_attempts == 0 {
+                    100.0
+                } else {
+                    self.suite_correct as f32 / self.suite_attempts as f32 * 100.0
+                }
+            ));
+        });
+        if let Some(message) = &self.suite_message {
+            w::panel().stroke(Stroke::new(1.0, w::GOLD)).show(ui, |ui| {
+                ui.label(RichText::new(message).strong().color(w::GOLD));
+            });
+            ui.add_space(8.0);
+        }
+        let pressure = matches!(self.suite.as_ref(), Some(SuiteActivity::PressureTable(_)));
+        match self.suite.as_mut() {
+            Some(SuiteActivity::RunningCount(drill)) => {
+                w::heading(
+                    ui,
+                    "Running Count",
+                    "The hole card joins the count only when it is revealed.",
+                );
+                ui.label(format!(
+                    "Round {} · {} cards seen · exact count {:+}",
+                    drill.rounds + 1,
+                    drill.exposed_cards(),
+                    drill.running_count()
+                ));
+                if drill.checkpoint.prompt {
+                    ui.label("Enter the exact running count.");
+                    ui.text_edit_singleline(&mut self.suite_input);
+                    if w::primary(ui, "Submit count  [Enter]").clicked() {
+                        *command = Some(Command::SuiteSubmit);
+                    }
+                    if ui.button("Next round").clicked() {
+                        *command = Some(Command::SuiteNext);
+                    }
+                } else if drill.rounds > 0 {
+                    if w::primary(ui, "Next round").clicked() {
+                        *command = Some(Command::SuiteNext);
+                    }
+                    w::muted(ui, "This round did not require a count checkpoint.");
+                } else {
+                    if w::primary(ui, "Reveal hole and finish round").clicked() {
+                        *command = Some(Command::SuiteReveal);
+                    }
+                    w::muted(
+                        ui,
+                        "No strategy decisions are required; count exposed cards exactly.",
+                    );
+                }
+            }
+            Some(SuiteActivity::TrueCount(drill)) => {
+                w::heading(
+                    ui,
+                    "True Count",
+                    "Stepped divisor, truncation toward zero, quarter-deck acceptance.",
+                );
+                let info = drill.info();
+                ui.label(format!(
+                    "{} decks · {} cards in discard · running count {:+}",
+                    drill.decks, info.cards, info.running_count
+                ));
+                ui.label(format!("Tray angle {} of 3", drill.angle + 1));
+                ui.text_edit_singleline(&mut self.suite_input);
+                if w::primary(ui, "Submit true count  [Enter]").clicked() {
+                    *command = Some(Command::SuiteSubmit);
+                }
+                if let Some(feedback) = drill.feedback {
+                    ui.label(format!(
+                        "{} · answer {}",
+                        if feedback.correct {
+                            "Correct"
+                        } else {
+                            "Incorrect"
+                        },
+                        feedback.expected
+                    ));
+                    if feedback.within_quarter_deck {
+                        w::muted(ui, "Accepted within a quarter deck.");
+                    }
+                }
+                if ui.button("Next discard pile").clicked() {
+                    *command = Some(Command::SuiteNext);
+                }
+            }
+            Some(SuiteActivity::BasicStrategy(drill)) => {
+                w::heading(
+                    ui,
+                    "Basic Strategy",
+                    "Generated from the current local chart and legal action context.",
+                );
+                if let Some(scenario) = drill.current() {
+                    ui.label(format!(
+                        "Situation {} · {} cards",
+                        scenario.situation.label(),
+                        scenario.card_count
+                    ));
+                    Self::suite_actions(ui, scenario.situation, command);
+                } else {
+                    ui.label("Basic Strategy drill complete.");
+                }
+                if let Some(feedback) = self.suite_feedback {
+                    ui.label(format!(
+                        "{} · your {} · correct {}",
+                        if feedback.correct {
+                            "Correct"
+                        } else {
+                            "Incorrect"
+                        },
+                        feedback.chosen.label(),
+                        feedback.expected.label()
+                    ));
+                    if ui.button("Next situation").clicked() {
+                        *command = Some(Command::SuiteNext);
+                    }
+                }
+            }
+            Some(SuiteActivity::CoreIndex(drill)) => {
+                w::heading(
+                    ui,
+                    "Core Index Plays",
+                    "Name the action and threshold for one local index rule.",
+                );
+                if let Some(scenario) = drill.current() {
+                    ui.label(scenario.situation.label());
+                    Self::suite_actions(ui, scenario.situation, command);
+                    ui.label("True-count threshold");
+                    ui.text_edit_singleline(&mut self.suite_input);
+                    if ui.button("Submit index").clicked() {
+                        *command = Some(Command::SuiteAct(Action::Hit));
+                    }
+                } else {
+                    ui.label("Core Index Plays complete.");
+                }
+            }
+            Some(SuiteActivity::TablePractice(table))
+            | Some(SuiteActivity::PressureTable(table)) => {
+                w::heading(
+                    ui,
+                    if pressure {
+                        "Pressure Table"
+                    } else {
+                        "Table Practice"
+                    },
+                    if pressure {
+                        "Play the local table while handling controlled distractions."
+                    } else {
+                        "A self-paced training shoe with separate count checks."
+                    },
+                );
+                w::game_table(ui, &table.game);
+                if pressure && self.suite_pressure_prompt.is_some() {
+                    ui.label(match self.suite_pressure_prompt {
+                        Some(twenty_one_pro::training_suite::PressurePrompt::Math {
+                            left,
+                            right,
+                        }) => format!("Math check: {left} + {right}"),
+                        Some(twenty_one_pro::training_suite::PressurePrompt::Mispay { .. }) => {
+                            "Did the dealer mispay? Enter 1 for yes or 0 for no.".to_owned()
+                        }
+                        Some(twenty_one_pro::training_suite::PressurePrompt::TimedDecision {
+                            limit_secs,
+                            ..
+                        }) => format!("Timed decision check: on time within {limit_secs} seconds?"),
+                        Some(twenty_one_pro::training_suite::PressurePrompt::GhostChange {
+                            ..
+                        }) => "Ghost seat change: enter 1 if occupied or 0 if empty.".to_owned(),
+                        None => String::new(),
+                    });
+                    ui.text_edit_singleline(&mut self.suite_input);
+                    if w::primary(ui, "Submit pressure answer  [Enter]").clicked() {
+                        *command = Some(Command::SuiteSubmit);
+                    }
+                } else if table.pending_count {
+                    ui.label("Count checkpoint");
+                    ui.text_edit_singleline(&mut self.suite_input);
+                    if w::primary(ui, "Submit count  [Enter]").clicked() {
+                        *command = Some(Command::SuiteSubmit);
+                    }
+                } else if table.game.phase == Phase::Ready {
+                    if w::primary(ui, "Deal first suite hand").clicked() {
+                        *command = Some(Command::SuiteNext);
+                    }
+                } else if table.game.phase == Phase::Finished {
+                    if w::primary(ui, "Next suite hand").clicked() {
+                        *command = Some(Command::SuiteNext);
+                    }
+                } else if let Some(situation) = table.game.situation() {
+                    Self::suite_actions(ui, situation, command);
+                }
+            }
+            Some(SuiteActivity::Assessment(session)) => {
+                w::heading(
+                    ui,
+                    "Assessment",
+                    "Three shoes. A single mistake fails the local report.",
+                );
+                ui.label(format!("Shoe {} of 3", session.shoes_completed + 1));
+                w::game_table(ui, &session.table.game);
+                if session.table.pending_count {
+                    ui.label("Count checkpoint");
+                    ui.text_edit_singleline(&mut self.suite_input);
+                    if w::primary(ui, "Submit count  [Enter]").clicked() {
+                        *command = Some(Command::SuiteSubmit);
+                    }
+                } else if session.table.game.phase == Phase::Ready {
+                    if w::primary(ui, "Deal assessment hand").clicked() {
+                        *command = Some(Command::SuiteNext);
+                    }
+                } else if session.table.game.phase == Phase::Finished {
+                    if ui.button("Complete current shoe").clicked() {
+                        *command = Some(Command::SuiteCompleteShoe);
+                    }
+                } else if let Some(situation) = session.table.game.situation() {
+                    Self::suite_actions(ui, situation, command);
+                }
+            }
+            None => {}
+        }
     }
 
     pub(super) fn rules_view(&self, ui: &mut egui::Ui) {

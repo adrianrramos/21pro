@@ -117,7 +117,7 @@ A review card whose scheduled review time has arrived or passed. Answering corre
 The learning approach that schedules situations for repeated practice over time, with errors returning sooner and successful due reviews receiving longer intervals.
 
 **Player profile**:
-The locally saved record of decision attempts, completed table rounds, review schedules, and correct counting trials. It is not an online account and does not resume an unfinished hand or counting trial after the app closes.
+The locally saved record of decision attempts, completed table rounds, review schedules, correct counting trials, and Training Suite summaries. It is not an online account and does not resume an unfinished hand or drill after the app closes.
 
 ### Card counting
 
@@ -130,6 +130,20 @@ The cumulative tally of exposed cards according to a card-counting system. The c
 **Counting trial**:
 One timed 52-card counting exercise followed by a final running-count answer. Trials are separate from blackjack rounds and do not advance the baseline or contribute to decision-accuracy statistics.
 
+### Training Suite
+
+**Training Suite**:
+A first-class top-level tab containing offline running-count, true-count, basic-strategy, core-index, table, assessment, and pressure exercises. Suite attempts use separate statistics and do not alter the existing table baseline or Insights heatmap.
+
+**True count**:
+The running count divided by a stepped estimate of decks remaining. Training Suite accepts the integer truncated toward zero and, where documented, an alternate estimate within a quarter deck.
+
+**Core index play**:
+A project-owned count-based action rule with an explicit hand class, dealer upcard, comparator, threshold, action, and ruleset condition. When no index matches, the ordinary local basic strategy applies.
+
+**Training stats**:
+Suite-only accuracy, streak, elapsed-time, and mistake-bucket counters persisted in the local player profile.
+
 ### Planned tools and capabilities
 
 **Hand-value display — Planned setting**:
@@ -138,8 +152,8 @@ The visibility of the app's calculated hand total during practice. A planned set
 **Practice focus — Proposed name; planned capability**:
 A learner-selected restriction on the kinds of exercises generated, such as soft hands, splitting situations, or doubling opportunities. This broader filtering capability is distinct from the existing drill for one exact situation.
 
-**Running-count check — Planned**:
-A periodic in-play prompt asking the learner to report the cumulative count of exposed cards. This planned check would evaluate the answer and record counting accuracy during play, rather than only at the end of a separate counting trial.
+**Running-count check**:
+A periodic in-play prompt asking the learner to report the cumulative count of exposed cards. It is separate from the 52-card Card-count trainer and records only suite counting accuracy.
 
 **Bankroll simulation — Planned**:
 A planning tool using inputs such as intended playing time, starting bankroll, and bet size to estimate expected value and variance. Its estimates would describe possible financial behavior, not predict or guarantee a particular casino result.
