@@ -1,10 +1,12 @@
 //! Simulated input against the real eframe app; no renderer or process-global test state.
-use super::{Page, TrainerApp, fixtures::Fixture};
+use super::{Command, Page, SuiteActivity, TrainerApp, fixtures::Fixture};
 use eframe::egui::{Key, accesskit::Role, vec2};
 use egui_kittest::{
     Harness,
     kittest::{NodeT, Queryable},
 };
+use std::time::{Duration, Instant};
+use twenty_one_pro::training_suite::ToolId;
 
 type AppHarness = Harness<'static, TrainerApp>;
 
@@ -193,4 +195,203 @@ fn counting_trial_from_fixture_is_assessed_without_advancing_table_baseline() {
     click(&mut harness, "02   Your insights");
     harness.get_by_label("0 / 250 rounds");
     assert!(harness.query_by_label("Start focused practice").is_none());
+}
+
+fn active_suite(tool: ToolId) -> AppHarness {
+    Harness::builder()
+        .with_size(vec2(1180.0, 860.0))
+        .build_eframe(move |cc| {
+            let mut app = TrainerApp::fixture(&cc.egui_ctx, Fixture::TrainingSuite).unwrap();
+            app.suite_seed = 7;
+            app.execute(Command::StartSuite(tool));
+            app
+        })
+}
+
+#[test]
+fn training_suite_menu_exposes_cards_settings_and_current_lifetime_stats() {
+    let harness = fixture(Fixture::TrainingSuite);
+    assert!(
+        harness
+            .query_all_by_label("CURRENT ACCURACY")
+            .next()
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_all_by_label("LIFETIME ACCURACY")
+            .next()
+            .is_some()
+    );
+    harness.get_by_label("End of shoe");
+    harness.get_by_label("1 round");
+    harness.get_by_label("Training Stats");
+    harness.get_by_label("Start Running Count");
+    harness.get_by_label("Start True Count");
+}
+
+#[test]
+fn running_count_active_surface_shows_automatic_table_and_preferences() {
+    let harness = active_suite(ToolId::RunningCount);
+    harness.get_by_label("DEALER");
+    assert!(harness.query_by_label("DISCARD TRAY").is_none());
+    harness.get_by_label("AUTOMATIC DEAL");
+    harness.get_by_label("PREFERENCES");
+    harness.get_by_label("Dealing speed: 6");
+    harness.get_by_label_contains("Penetration");
+}
+#[test]
+fn running_count_auto_deals_and_grades_a_wrong_count() {
+    let ctx = eframe::egui::Context::default();
+    let mut app = TrainerApp::fixture(&ctx, Fixture::TrainingSuite).unwrap();
+    app.suite_seed = 7;
+    app.execute(Command::StartSuite(ToolId::RunningCount));
+
+    let mut now = Instant::now() + Duration::from_secs(10);
+    let mut prompted = false;
+    for _ in 0..100 {
+        app.tick_running_count(now);
+        if matches!(
+            app.suite.as_ref(),
+            Some(SuiteActivity::RunningCount(drill)) if drill.checkpoint.prompt
+        ) {
+            prompted = true;
+            break;
+        }
+        now += Duration::from_secs(1);
+    }
+    assert!(prompted, "automatic round should reach a count prompt");
+
+    let expected = match app.suite.as_ref() {
+        Some(SuiteActivity::RunningCount(drill)) => drill.running_count(),
+        _ => panic!("Running Count should remain active at the prompt"),
+    };
+    app.suite_input = (expected + 1).to_string();
+    app.execute(Command::SuiteSubmit);
+    assert_eq!(app.suite_attempts, 1);
+    assert_eq!(app.suite_correct, 0);
+    assert!(
+        app.suite_message
+            .as_deref()
+            .is_some_and(|message| message.contains(&format!("{expected:+}")))
+    );
+}
+#[test]
+fn running_count_speed_setting_persists_and_rejects_invalid_labels() {
+    let ctx = eframe::egui::Context::default();
+    let mut app = TrainerApp::fixture(&ctx, Fixture::TrainingSuite).unwrap();
+
+    app.execute(Command::SuiteSetDealingSpeed(0));
+    assert_eq!(app.profile.suite_settings.dealing_delay_ms, 2_000);
+    app.execute(Command::SuiteSetDealingSpeed(11));
+    assert_eq!(app.profile.suite_settings.dealing_delay_ms, 2_000);
+    assert_eq!(
+        app.store
+            .as_ref()
+            .unwrap()
+            .load()
+            .unwrap()
+            .suite_settings
+            .dealing_delay_ms,
+        2_000
+    );
+}
+
+#[test]
+fn running_count_pauses_then_clears_before_next_deal() {
+    let ctx = eframe::egui::Context::default();
+    let mut app = TrainerApp::fixture(&ctx, Fixture::TrainingSuite).unwrap();
+    app.profile.suite_settings.count_every = None;
+    app.suite_seed = 7;
+    app.execute(Command::StartSuite(ToolId::RunningCount));
+
+    let mut now = Instant::now() + Duration::from_secs(10);
+    let clear_at = (0..200)
+        .find_map(|_| {
+            app.tick_running_count(now);
+            if let Some(clear_at) = app.suite_running_clear_at {
+                Some(clear_at)
+            } else {
+                now += Duration::from_secs(1);
+                None
+            }
+        })
+        .expect("automatic round should schedule a clear pause");
+    assert_eq!(clear_at, now + Duration::from_secs(3));
+    assert!(matches!(
+        app.suite.as_ref(),
+        Some(SuiteActivity::RunningCount(drill)) if drill.cards_visible()
+    ));
+
+    app.tick_running_count(now + Duration::from_secs(2));
+    assert!(matches!(
+        app.suite.as_ref(),
+        Some(SuiteActivity::RunningCount(drill)) if drill.cards_visible()
+    ));
+
+    app.tick_running_count(clear_at);
+    assert!(matches!(
+        app.suite.as_ref(),
+        Some(SuiteActivity::RunningCount(drill)) if !drill.cards_visible()
+    ));
+    let next_deal_at = app
+        .suite_running_next_step_at
+        .expect("clearing schedules the next deal");
+    app.tick_running_count(next_deal_at);
+    assert!(matches!(
+        app.suite.as_ref(),
+        Some(SuiteActivity::RunningCount(drill)) if drill.cards_visible()
+    ));
+    assert!(app.running_count_card_progress(next_deal_at) <= f32::EPSILON);
+}
+
+#[test]
+fn true_count_active_surface_exposes_tray_angles_and_answer_card() {
+    let mut harness = active_suite(ToolId::TrueCount);
+    harness.get_by_label("DISCARD TRAY");
+    harness.get_by_label("TRAY ANGLE");
+    harness.get_by_label("ENTER THE TRUE COUNT");
+    harness.get_by_label("›").click();
+    harness.run_steps(2);
+}
+
+#[test]
+fn basic_strategy_active_surface_shows_cards_and_actions() {
+    let harness = active_suite(ToolId::BasicStrategy);
+    harness.get_by_label("DEALER");
+    harness.get_by_label("DECISION CARD");
+    harness.get_by_label("Hit [H]");
+}
+
+#[test]
+fn core_index_active_surface_shows_cards_and_threshold_input() {
+    let harness = active_suite(ToolId::CoreIndexPlays);
+    harness.get_by_label("DEALER");
+    harness.get_by_label("INDEX DECISION");
+    harness.get_by_label("True-count threshold");
+}
+
+#[test]
+fn pressure_table_active_surface_shows_ghost_and_decision_clock() {
+    let harness = active_suite(ToolId::PressureTable);
+    harness.get_by_label("PRESSURE FEED");
+    harness.get_by_label("Ghost seat occupied");
+    harness.get_by_label_contains("Decision clock");
+    harness.get_by_label("Hit [H]");
+}
+
+#[test]
+fn ending_a_suite_session_records_incomplete_without_a_finished_report() {
+    let ctx = eframe::egui::Context::default();
+    let mut app = TrainerApp::fixture(&ctx, Fixture::TrainingSuite).unwrap();
+    app.execute(Command::StartSuite(ToolId::RunningCount));
+    app.execute(Command::SuiteEnd);
+    assert!(app.suite_report.is_none());
+    let session = app
+        .profile
+        .suite_sessions
+        .last()
+        .expect("session is persisted");
+    assert!(!session.finished);
+    assert_eq!(session.passed, None);
 }

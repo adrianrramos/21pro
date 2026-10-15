@@ -111,6 +111,101 @@ pub const fn card_value(rank: Rank) -> i8 {
         Rank::Ace | Rank::Ten | Rank::Jack | Rank::Queen | Rank::King => -1,
     }
 }
+/// The public Hi-Lo value for one rank.
+pub const fn hi_lo(rank: Rank) -> i8 {
+    card_value(rank)
+}
+
+/// Sums Hi-Lo values for exposed cards.
+pub fn running_count(cards: &[Card]) -> i32 {
+    cards.iter().map(|card| i32::from(hi_lo(card.rank))).sum()
+}
+
+/// Returns the stepped deck divisor used by the suite.
+pub fn true_count_divisor(decks: usize, discarded_cards: usize, half_deck: bool) -> f64 {
+    let step = if half_deck { 26 } else { 52 };
+    let buckets = discarded_cards / step;
+    decks as f64 - buckets as f64 / if half_deck { 2.0 } else { 1.0 }
+}
+
+/// Truncates a finite decimal toward zero, unlike `floor` for negative values.
+pub fn truncate_toward_zero(value: f64) -> i32 {
+    if value.is_sign_negative() {
+        value.ceil() as i32
+    } else {
+        value.floor() as i32
+    }
+}
+
+/// Returns the primary truncated true-count answer.
+pub fn truncated_true_count(
+    running_count: i32,
+    decks: usize,
+    discarded_cards: usize,
+    half_deck: bool,
+) -> i32 {
+    let divisor = true_count_divisor(decks, discarded_cards, half_deck);
+    if divisor == 0.0 {
+        return 0;
+    }
+    truncate_toward_zero(f64::from(running_count) / divisor)
+}
+
+/// Returns the alternate answer accepted when the implied estimate is within a
+/// quarter deck. `None` means the allowance is intentionally disabled near a
+/// fresh shoe or the cut card.
+pub fn quarter_deck_alternate(
+    decks: usize,
+    discarded_cards: usize,
+    running_count: i32,
+    half_deck: bool,
+) -> Option<i32> {
+    let total_cards = decks.saturating_mul(52);
+    if discarded_cards <= 13 || total_cards.saturating_sub(discarded_cards) <= 13 {
+        return None;
+    }
+    let exact_remaining = decks as f64 - discarded_cards as f64 / 52.0;
+    let fraction = exact_remaining.rem_euclid(1.0);
+    let allowance = quarter_deck_allowance(fraction, half_deck);
+    if allowance == 0.0 {
+        return None;
+    }
+    let alternate_divisor = true_count_divisor(decks, discarded_cards, half_deck) - allowance;
+    (alternate_divisor > 0.0)
+        .then(|| truncate_toward_zero(f64::from(running_count) / alternate_divisor))
+}
+
+fn quarter_deck_allowance(fraction: f64, half_deck: bool) -> f64 {
+    const EPSILON: f64 = 1e-9;
+    if fraction.abs() <= EPSILON {
+        return if half_deck { -0.5 } else { -1.0 };
+    }
+    if half_deck {
+        if (fraction - 0.5).abs() <= EPSILON {
+            return -0.5;
+        }
+        if (0.25 - EPSILON..0.5).contains(&fraction) {
+            return -0.5;
+        }
+        if fraction > 0.5 && fraction <= 0.75 + EPSILON {
+            return 0.5;
+        }
+        if fraction < 0.25 {
+            return 0.5;
+        }
+        if fraction > 0.75 {
+            return -0.5;
+        }
+        return 0.0;
+    }
+    if fraction <= 0.25 + EPSILON {
+        return 1.0;
+    }
+    if fraction >= 0.75 - EPSILON {
+        return -1.0;
+    }
+    0.0
+}
 
 /// Parses a signed whole-number answer after trimming whitespace.
 pub fn parse_submitted_count(input: &str) -> Option<i32> {
@@ -136,6 +231,40 @@ mod tests {
         assert_eq!(card_value(Rank::Nine), 0);
         assert_eq!(card_value(Rank::Ten), -1);
         assert_eq!(card_value(Rank::Ace), -1);
+    }
+
+    #[test]
+    fn count_math_matches_suite_boundaries() {
+        let cards = [
+            Card {
+                rank: Rank::Two,
+                suit: Suit::Clubs,
+            },
+            Card {
+                rank: Rank::Nine,
+                suit: Suit::Hearts,
+            },
+            Card {
+                rank: Rank::Ace,
+                suit: Suit::Spades,
+            },
+            Card {
+                rank: Rank::King,
+                suit: Suit::Diamonds,
+            },
+            Card {
+                rank: Rank::Six,
+                suit: Suit::Clubs,
+            },
+        ];
+        assert_eq!(running_count(&cards), 0);
+        assert_eq!(true_count_divisor(2, 72, false), 1.0);
+        assert_eq!(true_count_divisor(2, 72, true), 1.0);
+        assert_eq!(truncate_toward_zero(1.9), 1);
+        assert_eq!(truncate_toward_zero(-1.9), -1);
+        assert_eq!(truncated_true_count(3, 2, 72, false), 3);
+        assert_eq!(quarter_deck_alternate(2, 40, 3, false), Some(3));
+        assert_eq!(quarter_deck_alternate(2, 14, 3, false), None);
     }
 
     #[test]

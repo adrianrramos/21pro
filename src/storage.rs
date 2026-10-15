@@ -15,6 +15,7 @@ const PROFILE: TableDefinition<&str, &[u8]> = TableDefinition::new("profile");
 const PROFILE_KEY: &str = "current";
 
 const LEGACY_SCHEMA_VERSION: u64 = 1;
+const PREVIOUS_SCHEMA_VERSION: u64 = 2;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -109,7 +110,7 @@ impl Store {
         check_version(version)?;
         let mut profile: Profile = serde_json::from_value(value)
             .map_err(|error| StorageError::Corrupt(error.to_string()))?;
-        if version == LEGACY_SCHEMA_VERSION {
+        if version < u64::from(SCHEMA_VERSION) {
             profile.schema_version = SCHEMA_VERSION;
         }
         validate(&profile)?;
@@ -141,7 +142,10 @@ fn database_error(error: impl std::fmt::Display) -> StorageError {
 }
 
 fn check_version(version: u64) -> Result<(), StorageError> {
-    if version != LEGACY_SCHEMA_VERSION && version != u64::from(SCHEMA_VERSION) {
+    if version != LEGACY_SCHEMA_VERSION
+        && version != PREVIOUS_SCHEMA_VERSION
+        && version != u64::from(SCHEMA_VERSION)
+    {
         return Err(StorageError::Version {
             found: version,
             supported: SCHEMA_VERSION,
@@ -164,6 +168,41 @@ fn validate(profile: &Profile) -> Result<(), StorageError> {
         });
     }
     let corrupt = |message: &str| StorageError::Corrupt(message.to_owned());
+    if !matches!(profile.suite_settings.true_count_decks, 2 | 4 | 6 | 8)
+        || !matches!(
+            profile.suite_settings.true_count_duration_secs,
+            90 | 150 | 300 | 600
+        )
+        || !matches!(
+            profile.suite_settings.dealing_delay_ms,
+            0 | 200 | 400 | 600 | 800 | 1_000 | 1_200 | 1_400 | 1_600 | 1_800 | 2_000
+        )
+        || profile
+            .suite_settings
+            .count_every
+            .is_some_and(|interval| !matches!(interval, 1 | 3 | 5 | 10 | 25))
+    {
+        return Err(corrupt("invalid Training Suite settings"));
+    }
+    if profile.suite_stats.correct > profile.suite_stats.attempts
+        || profile.suite_stats.current_correct > profile.suite_stats.current_attempts
+        || profile
+            .suite_stats
+            .buckets
+            .values()
+            .any(|stats| stats.correct > stats.attempts)
+        || profile
+            .suite_stats
+            .current_buckets
+            .values()
+            .any(|stats| stats.correct > stats.attempts)
+        || profile
+            .suite_sessions
+            .iter()
+            .any(|session| session.correct > session.attempts)
+    {
+        return Err(corrupt("invalid Training Suite statistics"));
+    }
     if profile.rounds.iter().any(|round| round.at < 0)
         || profile
             .counting_history
@@ -233,6 +272,7 @@ mod tests {
     use super::*;
     use crate::model::{Action, HandKind};
     use crate::training::{Attempt, RoundRecord, StudyMode};
+    use crate::training_suite::GradeBucket;
 
     fn situation() -> Situation {
         Situation {
@@ -274,6 +314,8 @@ mod tests {
         profile.record_attempt(original, Action::Stand, 1000, StudyMode::Table);
         profile.record_attempt(after_hit, Action::Stand, 1100, StudyMode::Practice);
         profile.record_counting_trial(1200, 3456);
+        profile.record_suite_attempt(GradeBucket::Count, true);
+        profile.record_suite_attempt(GradeBucket::Math, false);
         store.save(&profile).unwrap();
         let before = serde_json::to_value(&profile).unwrap();
         drop(store);
@@ -285,6 +327,8 @@ mod tests {
         assert_eq!(loaded.reviews.len(), 2);
         assert_eq!(loaded.counting_history.len(), 1);
         assert_eq!(loaded.counting_history[0].duration_ms, 3456);
+        assert_eq!(loaded.suite_stats.attempts, 2);
+        assert_eq!(loaded.suite_stats.correct, 1);
         assert_eq!(loaded.due_count(1600), 1);
         assert_eq!(loaded.practice_queue(1800, 10), vec![original, after_hit]);
         assert_eq!(

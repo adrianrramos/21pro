@@ -9,6 +9,361 @@ pub struct Recommendation {
     pub explanation: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexComparison {
+    Less,
+    LessOrEqual,
+    Greater,
+    GreaterOrEqual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IndexPlay {
+    pub ruleset: &'static str,
+    pub kind: HandKind,
+    pub value: u8,
+    pub dealer: u8,
+    pub comparison: IndexComparison,
+    pub threshold: f32,
+    pub action: Action,
+    pub das_only: bool,
+    pub surrender_only: bool,
+    pub insurance: bool,
+}
+
+impl IndexPlay {
+    pub const fn matches(self, true_count: f32) -> bool {
+        match self.comparison {
+            IndexComparison::Less => true_count < self.threshold,
+            IndexComparison::LessOrEqual => true_count <= self.threshold,
+            IndexComparison::Greater => true_count > self.threshold,
+            IndexComparison::GreaterOrEqual => true_count >= self.threshold,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategySource {
+    BasicStrategy,
+    CoreIndex,
+}
+
+pub const fn core_index_plays() -> &'static [IndexPlay] {
+    &CORE_INDEX_PLAYS
+}
+
+/// Applies the local core index set, then falls back to ordinary basic strategy.
+pub fn graded_action(
+    situation: Situation,
+    true_count: Option<f32>,
+    indexes: &[IndexPlay],
+) -> (Recommendation, StrategySource) {
+    let basic = recommendation(situation);
+    let Some(true_count) = true_count else {
+        return (basic, StrategySource::BasicStrategy);
+    };
+    let mut selected = None;
+    for &index in indexes {
+        if index.ruleset != crate::model::RULESET_ID
+            || index.kind != situation.kind
+            || index.value != situation.value
+            || index.dealer != situation.dealer
+            || (index.das_only && !situation.can_double)
+            || (index.surrender_only && !situation.can_surrender)
+            || !index.matches(true_count)
+            || !situation.allows(index.action)
+        {
+            continue;
+        }
+        let priority = match index.action {
+            Action::Surrender => 4,
+            Action::Split => 3,
+            Action::Double => 2,
+            Action::Hit | Action::Stand => 1,
+            Action::Insure | Action::DeclineInsurance => 0,
+        };
+        if selected.is_none_or(|(_, old_priority)| priority > old_priority) {
+            selected = Some((index, priority));
+        }
+    }
+    selected.map_or((basic, StrategySource::BasicStrategy), |(index, _)| {
+        (
+            Recommendation {
+                action: index.action,
+                explanation: "Core index play applies at this true count.",
+            },
+            StrategySource::CoreIndex,
+        )
+    })
+}
+
+const CORE_INDEX_PLAYS: [IndexPlay; 22] = [
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Insurance,
+        value: 0,
+        dealer: 11,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 3.0,
+        action: Action::Insure,
+        das_only: false,
+        surrender_only: false,
+        insurance: true,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 16,
+        dealer: 10,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 0.0,
+        action: Action::Stand,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 15,
+        dealer: 10,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 4.0,
+        action: Action::Stand,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 10,
+        dealer: 10,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 4.0,
+        action: Action::Double,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 12,
+        dealer: 3,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 2.0,
+        action: Action::Stand,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 12,
+        dealer: 2,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 3.0,
+        action: Action::Stand,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 11,
+        dealer: 11,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 1.0,
+        action: Action::Double,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 9,
+        dealer: 2,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 1.0,
+        action: Action::Double,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 10,
+        dealer: 11,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 4.0,
+        action: Action::Double,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 9,
+        dealer: 7,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 3.0,
+        action: Action::Double,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 16,
+        dealer: 9,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 5.0,
+        action: Action::Stand,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 13,
+        dealer: 2,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: -1.0,
+        action: Action::Stand,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 12,
+        dealer: 4,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 0.0,
+        action: Action::Stand,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 12,
+        dealer: 5,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: -2.0,
+        action: Action::Stand,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 12,
+        dealer: 6,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: -1.0,
+        action: Action::Stand,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 13,
+        dealer: 3,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: -2.0,
+        action: Action::Stand,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 15,
+        dealer: 9,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 2.0,
+        action: Action::Stand,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 16,
+        dealer: 8,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 4.0,
+        action: Action::Stand,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 14,
+        dealer: 9,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 5.0,
+        action: Action::Surrender,
+        das_only: false,
+        surrender_only: true,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 14,
+        dealer: 11,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 3.0,
+        action: Action::Surrender,
+        das_only: false,
+        surrender_only: true,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 14,
+        dealer: 10,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 3.0,
+        action: Action::Surrender,
+        das_only: false,
+        surrender_only: true,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Hard,
+        value: 15,
+        dealer: 10,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 0.0,
+        action: Action::Surrender,
+        das_only: false,
+        surrender_only: true,
+        insurance: false,
+    },
+];
+
 pub fn recommendation(s: Situation) -> Recommendation {
     use Action::*;
     let result = |action, explanation| Recommendation {
@@ -206,6 +561,47 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn core_indexes_are_illustrious_eighteen_plus_fab_four() {
+        let plays = core_index_plays();
+        assert_eq!(plays.len(), 22);
+        assert!(!plays.iter().any(|play| play.kind == HandKind::Pair));
+        let expected = [
+            (HandKind::Insurance, 0, 11, 3.0, Action::Insure, false),
+            (HandKind::Hard, 16, 10, 0.0, Action::Stand, false),
+            (HandKind::Hard, 15, 10, 4.0, Action::Stand, false),
+            (HandKind::Hard, 10, 10, 4.0, Action::Double, false),
+            (HandKind::Hard, 12, 3, 2.0, Action::Stand, false),
+            (HandKind::Hard, 12, 2, 3.0, Action::Stand, false),
+            (HandKind::Hard, 11, 11, 1.0, Action::Double, false),
+            (HandKind::Hard, 9, 2, 1.0, Action::Double, false),
+            (HandKind::Hard, 10, 11, 4.0, Action::Double, false),
+            (HandKind::Hard, 9, 7, 3.0, Action::Double, false),
+            (HandKind::Hard, 16, 9, 5.0, Action::Stand, false),
+            (HandKind::Hard, 13, 2, -1.0, Action::Stand, false),
+            (HandKind::Hard, 12, 4, 0.0, Action::Stand, false),
+            (HandKind::Hard, 12, 5, -2.0, Action::Stand, false),
+            (HandKind::Hard, 12, 6, -1.0, Action::Stand, false),
+            (HandKind::Hard, 13, 3, -2.0, Action::Stand, false),
+            (HandKind::Hard, 15, 9, 2.0, Action::Stand, false),
+            (HandKind::Hard, 16, 8, 4.0, Action::Stand, false),
+            (HandKind::Hard, 14, 9, 5.0, Action::Surrender, true),
+            (HandKind::Hard, 14, 11, 3.0, Action::Surrender, true),
+            (HandKind::Hard, 14, 10, 3.0, Action::Surrender, true),
+            (HandKind::Hard, 15, 10, 0.0, Action::Surrender, true),
+        ];
+        for (kind, value, dealer, threshold, action, surrender_only) in expected {
+            assert!(plays.iter().any(|play| {
+                play.kind == kind
+                    && play.value == value
+                    && play.dealer == dealer
+                    && (play.threshold - threshold).abs() < f32::EPSILON
+                    && play.action == action
+                    && play.surrender_only == surrender_only
+            }));
         }
     }
 

@@ -11,8 +11,9 @@ use crate::counting::CountingRecord;
 use crate::game::valid_practice_situation;
 use crate::model::{ASSESSMENT_ROUNDS, Action, HandKind, RULESET_ID, Situation};
 use crate::strategy::recommendation;
+use crate::training_suite::{GradeBucket, SuiteStats, ToolSession, ToolSettings};
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 const DAY: i64 = 86_400;
 const RELEARNING_SECONDS: i64 = 600;
 
@@ -102,6 +103,12 @@ pub struct Profile {
     pub reviews: Vec<ReviewState>,
     #[serde(default)]
     pub counting_history: Vec<CountingRecord>,
+    #[serde(default)]
+    pub suite_settings: ToolSettings,
+    #[serde(default)]
+    pub suite_stats: SuiteStats,
+    #[serde(default)]
+    pub suite_sessions: Vec<ToolSession>,
 }
 
 impl Default for Profile {
@@ -113,6 +120,9 @@ impl Default for Profile {
             attempts: Vec::new(),
             reviews: Vec::new(),
             counting_history: Vec::new(),
+            suite_settings: ToolSettings::default(),
+            suite_stats: SuiteStats::default(),
+            suite_sessions: Vec::new(),
         }
     }
 }
@@ -294,6 +304,25 @@ impl Profile {
             .iter()
             .filter(|review| review.due_at <= now)
             .count()
+    }
+    pub fn record_suite_attempt(&mut self, bucket: GradeBucket, correct: bool) {
+        self.suite_stats.record(bucket, correct);
+    }
+
+    pub fn record_suite_session(&mut self, session: ToolSession) {
+        self.suite_stats.elapsed_secs = self
+            .suite_stats
+            .elapsed_secs
+            .saturating_add(session.elapsed_secs);
+        self.suite_stats.current_elapsed_secs = self
+            .suite_stats
+            .current_elapsed_secs
+            .saturating_add(session.elapsed_secs);
+        self.suite_sessions.push(session);
+    }
+
+    pub fn reset_suite_current_stats(&mut self) {
+        self.suite_stats.reset_current();
     }
 }
 
