@@ -18,6 +18,7 @@ use twenty_one_pro::{
     counting::{CountingRecord, CountingTrial, parse_submitted_count, sorted_history},
     game::{Game, GameError, Phase},
     model::{Action, HandKind, Situation},
+    play::{self, PlaySession},
     storage::{self, Store},
     strategy,
     training::{Analytics, CellStats, Profile, StudyMode},
@@ -29,6 +30,7 @@ enum Page {
     Insights,
     Practice,
     Counting,
+    Play,
     Rules,
 }
 
@@ -58,6 +60,12 @@ impl CountingAssessment {
 enum Command {
     Deal,
     Act(Action),
+    PlayDeal,
+    PlayAct(Action),
+    PlayChip(i64),
+    PlayUndo,
+    PlayClear,
+    ResetPlay(i64),
     StartPractice(Vec<Situation>),
     NextPractice,
     StartCounting,
@@ -66,6 +74,15 @@ enum Command {
     SubmitCounting,
     RetrySave,
 }
+const ACTION_SHORTCUTS: [(egui::Key, Action); 7] = [
+    (egui::Key::H, Action::Hit),
+    (egui::Key::S, Action::Stand),
+    (egui::Key::D, Action::Double),
+    (egui::Key::P, Action::Split),
+    (egui::Key::R, Action::Surrender),
+    (egui::Key::I, Action::Insure),
+    (egui::Key::N, Action::DeclineInsurance),
+];
 
 pub struct TrainerApp {
     page: Page,
@@ -94,6 +111,10 @@ pub struct TrainerApp {
     counting_assessment: Option<CountingAssessment>,
     // Sorted committed history; pending writes stay out until retry succeeds.
     counting_history: Vec<CountingRecord>,
+    play: PlaySession,
+    reset_input: String,
+    reset_confirming: bool,
+    reset_input_error: Option<String>,
     filter: Option<StudyMode>,
     analytics: Analytics,
     table_stats: CellStats,
@@ -126,16 +147,26 @@ impl TrainerApp {
         let mut startup_error = None;
         let mut store = None;
         let mut profile = Profile::default();
+        let mut play = PlaySession::new(rand::random());
         let path = match configured_data_path(std::env::var_os("TWENTY_ONE_PRO_DATA_DIR")) {
             Some(path) => Ok(path),
             None => storage::default_path(),
         };
         let data_path = match path {
             Ok(path) => {
-                match Store::open(&path).and_then(|db| db.load().map(|saved| (db, saved))) {
-                    Ok((db, saved)) => {
+                match Store::open(&path).and_then(|db| {
+                    let saved_profile = db.load()?;
+                    let saved_play = db.load_free_play()?;
+                    Ok((db, saved_profile, saved_play))
+                }) {
+                    Ok((db, saved_profile, Some(saved_play))) => {
                         store = Some(db);
-                        profile = saved;
+                        profile = saved_profile;
+                        play = saved_play;
+                    }
+                    Ok((db, saved_profile, None)) => {
+                        store = Some(db);
+                        profile = saved_profile;
                     }
                     Err(error) => startup_error = Some(error.to_string()),
                 }
@@ -153,6 +184,7 @@ impl TrainerApp {
             data_path,
             Game::new(rand::random()),
         );
+        app.play = play;
         app.startup_error = startup_error;
         Ok(app)
     }
@@ -194,6 +226,10 @@ impl TrainerApp {
             counting_input_error: None,
             counting_assessment: None,
             counting_history,
+            play: PlaySession::new(rand::random()),
+            reset_input: String::new(),
+            reset_confirming: false,
+            reset_input_error: None,
             filter: Some(StudyMode::Table),
             analytics,
             table_stats,
@@ -297,7 +333,7 @@ impl TrainerApp {
         let Some(store) = &self.store else {
             return false;
         };
-        match store.save(&self.profile) {
+        match store.save_all(&self.profile, Some(&self.play)) {
             Ok(()) => {
                 self.dirty = false;
                 self.error = None;
@@ -437,6 +473,48 @@ impl TrainerApp {
                 self.refresh_analytics();
                 self.persist_progress();
             }
+            Command::PlayDeal => match self.play.deal() {
+                Ok(()) => {
+                    self.error = None;
+                    self.persist_progress();
+                }
+                Err(error) => self.error = Some(error.to_string()),
+            },
+            Command::PlayAct(action) => match self.play.act(action) {
+                Ok(()) => {
+                    self.error = None;
+                    self.persist_progress();
+                }
+                Err(error) => self.error = Some(error.to_string()),
+            },
+            Command::PlayChip(cents) => match self.play.add_chip(cents) {
+                Ok(()) => {
+                    self.error = None;
+                    self.persist_progress();
+                }
+                Err(error) => self.error = Some(error.to_string()),
+            },
+            Command::PlayUndo => match self.play.undo_chip() {
+                Ok(()) => {
+                    self.persist_progress();
+                }
+                Err(error) => self.error = Some(error.to_string()),
+            },
+            Command::PlayClear => match self.play.clear_wager() {
+                Ok(()) => {
+                    self.persist_progress();
+                }
+                Err(error) => self.error = Some(error.to_string()),
+            },
+            Command::ResetPlay(bankroll) => match self.play.reset(bankroll, rand::random()) {
+                Ok(()) => {
+                    self.reset_confirming = false;
+                    self.reset_input_error = None;
+                    self.error = None;
+                    self.persist_progress();
+                }
+                Err(error) => self.reset_input_error = Some(error.to_string()),
+            },
             Command::StartPractice(queue) => {
                 if !self.profile.assessment_unlocked() || queue.is_empty() {
                     return;
@@ -517,6 +595,29 @@ impl TrainerApp {
         if self.dirty || ctx.egui_wants_keyboard_input() {
             return None;
         }
+        if self.page == Page::Play {
+            return ctx.input(|input| {
+                if input.modifiers.any() {
+                    return None;
+                }
+                if input.key_pressed(egui::Key::Enter)
+                    && matches!(self.play.phase(), Phase::Ready | Phase::Finished)
+                    && self.play.pending_wager_cents() >= play::MINIMUM_WAGER_CENTS
+                    && self.play.pending_wager_cents() <= self.play.available_cents()
+                {
+                    return Some(Command::PlayDeal);
+                }
+                let situation = self.play.game().situation()?;
+                ACTION_SHORTCUTS
+                    .into_iter()
+                    .find(|(key, action)| {
+                        input.key_pressed(*key)
+                            && situation.allows(*action)
+                            && self.play.can_afford(*action)
+                    })
+                    .map(|(_, action)| Command::PlayAct(action))
+            });
+        }
         ctx.input(|input| {
             if input.modifiers.any() {
                 return None;
@@ -548,18 +649,10 @@ impl TrainerApp {
                 };
             }
             let situation = game.situation()?;
-            [
-                (egui::Key::H, Action::Hit),
-                (egui::Key::S, Action::Stand),
-                (egui::Key::D, Action::Double),
-                (egui::Key::P, Action::Split),
-                (egui::Key::R, Action::Surrender),
-                (egui::Key::I, Action::Insure),
-                (egui::Key::N, Action::DeclineInsurance),
-            ]
-            .into_iter()
-            .find(|(key, action)| input.key_pressed(*key) && situation.allows(*action))
-            .map(|(_, action)| Command::Act(action))
+            ACTION_SHORTCUTS
+                .into_iter()
+                .find(|(key, action)| input.key_pressed(*key) && situation.allows(*action))
+                .map(|(_, action)| Command::Act(action))
         })
     }
 }
@@ -633,6 +726,7 @@ impl eframe::App for TrainerApp {
                         Page::Insights => self.insights_view(ui, &mut command),
                         Page::Practice => self.practice_view(ui, &mut command),
                         Page::Counting => self.counting_view(ui, &mut command),
+                        Page::Play => self.play_view(ui, &mut command),
                         Page::Rules => self.rules_view(ui),
                     }
                 });

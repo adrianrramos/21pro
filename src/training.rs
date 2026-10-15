@@ -188,12 +188,8 @@ impl Profile {
 
     /// Records one completed correct counting trial.
     ///
-    /// `completed_at` is a non-negative Unix timestamp in seconds.
+    /// `completed_at` is a Unix timestamp in seconds.
     /// `duration_ms` is the elapsed trial duration in milliseconds.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `completed_at` is negative.
     pub fn record_counting_trial(&mut self, completed_at: i64, duration_ms: u64) {
         self.counting_history.push(CountingRecord {
             completed_at,
@@ -502,6 +498,7 @@ mod tests {
         );
         assert_eq!(p.reviews[0].situation, insurance);
     }
+
     #[test]
     fn illegal_actions_do_not_enter_history() {
         let mut p = Profile::default();

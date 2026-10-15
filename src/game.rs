@@ -8,18 +8,19 @@
 //! side bet paying two to one, not part of that main-bet loss cap.
 use crate::model::{Action, Card, HandKind, Rank, Situation, Suit, hand_value};
 use rand::{SeedableRng, rngs::SmallRng, seq::SliceRandom};
+use serde::{Deserialize, Serialize};
 
 const BASE_BET: i32 = 2;
 const CUT_CARD: usize = 68;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Phase {
     Ready,
     Insurance,
     Playing,
     Finished,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HandStatus {
     Playing,
     Stood,
@@ -27,7 +28,7 @@ pub enum HandStatus {
     Surrendered,
     Settled,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayerHand {
     pub cards: Vec<Card>,
     pub wager_half_units: i32,
@@ -52,13 +53,13 @@ impl PlayerHand {
         self.cards.len() == 2 && self.cards[0].rank.value() == self.cards[1].rank.value()
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoundResult {
     pub net_half_units: i32,
     pub outcomes: Vec<HandOutcome>,
     pub dealer_blackjack: bool,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandOutcome {
     pub label: String,
     pub net_half_units: i32,
@@ -73,13 +74,32 @@ pub enum GameError {
     IllegalAction(Action),
     #[error("Unreachable practice situation: {0}")]
     InvalidPractice(&'static str),
+    #[error("Invalid saved game: {0}")]
+    InvalidSnapshot(String),
     #[error("The shoe has no cards available for this action.")]
     ShoeExhausted,
     #[error("The game state is missing cards required for this action.")]
     InvalidState(&'static str),
 }
 
-#[derive(Debug, Clone)]
+/// Serializable game state for durable Free Play resume.
+///
+/// The shoe contains only undealt cards; cards from earlier completed rounds
+/// are intentionally no longer represented. `from_snapshot` validates the
+/// physical-card, phase, wager, and hidden-card invariants.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GameSnapshot {
+    pub dealer: Vec<Card>,
+    pub hands: Vec<PlayerHand>,
+    pub active: usize,
+    pub phase: Phase,
+    pub result: Option<RoundResult>,
+    pub shoe: Vec<Card>,
+    pub insured: bool,
+    pub splits_used: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Game {
     /// Upcard first; the renderer must conceal index 1 until Phase::Finished.
     pub dealer: Vec<Card>,
@@ -88,10 +108,49 @@ pub struct Game {
     pub phase: Phase,
     pub result: Option<RoundResult>,
     shoe: Vec<Card>,
+    #[serde(skip, default = "default_rng")]
     rng: SmallRng,
     insured: bool,
     // Practice may reserve prior split capacity without inventing extra hands.
     splits_used: usize,
+}
+
+#[derive(Deserialize)]
+struct GameWire {
+    dealer: Vec<Card>,
+    hands: Vec<PlayerHand>,
+    active: usize,
+    phase: Phase,
+    result: Option<RoundResult>,
+    shoe: Vec<Card>,
+    insured: bool,
+    splits_used: usize,
+}
+
+impl<'de> Deserialize<'de> for Game {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = GameWire::deserialize(deserializer)?;
+        let game = Self {
+            dealer: wire.dealer,
+            hands: wire.hands,
+            active: wire.active,
+            phase: wire.phase,
+            result: wire.result,
+            shoe: wire.shoe,
+            rng: default_rng(),
+            insured: wire.insured,
+            splits_used: wire.splits_used,
+        };
+        game.validate().map_err(serde::de::Error::custom)?;
+        Ok(game)
+    }
+}
+
+fn default_rng() -> SmallRng {
+    SmallRng::seed_from_u64(rand::random())
 }
 
 impl Game {
@@ -109,6 +168,48 @@ impl Game {
         };
         game.shuffle();
         game
+    }
+
+    /// Copies the current game state without the non-serialized RNG.
+    pub fn snapshot(&self) -> GameSnapshot {
+        GameSnapshot {
+            dealer: self.dealer.clone(),
+            hands: self.hands.clone(),
+            active: self.active,
+            phase: self.phase,
+            result: self.result.clone(),
+            shoe: self.shoe.clone(),
+            insured: self.insured,
+            splits_used: self.splits_used,
+        }
+    }
+
+    /// Restores and validates a persisted game state.
+    pub fn from_snapshot(snapshot: GameSnapshot) -> Result<Self, GameError> {
+        validate_snapshot(&snapshot)?;
+        Ok(Self {
+            dealer: snapshot.dealer,
+            hands: snapshot.hands,
+            active: snapshot.active,
+            phase: snapshot.phase,
+            result: snapshot.result,
+            shoe: snapshot.shoe,
+            rng: SmallRng::seed_from_u64(rand::random()),
+            insured: snapshot.insured,
+            splits_used: snapshot.splits_used,
+        })
+    }
+    pub(crate) fn validate(&self) -> Result<(), GameError> {
+        validate_game_state(GameState {
+            dealer: &self.dealer,
+            hands: &self.hands,
+            active: self.active,
+            phase: self.phase,
+            result: self.result.as_ref(),
+            shoe: &self.shoe,
+            insured: self.insured,
+            splits_used: self.splits_used,
+        })
     }
 
     fn shuffle(&mut self) {
@@ -129,8 +230,23 @@ impl Game {
         self.shoe.pop().ok_or(GameError::ShoeExhausted)
     }
 
+    /// Returns the number of undealt cards in the current shoe.
     pub fn remaining_cards(&self) -> usize {
         self.shoe.len()
+    }
+
+    /// Returns whether the independent insurance stake is reserved.
+    pub fn insured(&self) -> bool {
+        self.insured
+    }
+
+    /// Total reserved main and insurance stake in half-units.
+    pub fn stake_half_units(&self) -> i32 {
+        self.hands
+            .iter()
+            .map(|hand| hand.wager_half_units)
+            .sum::<i32>()
+            + i32::from(self.insured)
     }
 
     pub fn deal(&mut self) -> Result<(), GameError> {
@@ -219,6 +335,13 @@ impl Game {
             Action::Insure | Action::DeclineInsurance => {
                 self.insured = action == Action::Insure;
                 self.phase = Phase::Playing;
+                if self.dealer_has_blackjack() {
+                    self.active = self.hands.len();
+                    self.settle()?;
+                } else {
+                    self.advance()?;
+                }
+                return Ok(());
             }
             Action::Hit => {
                 let card = self.draw()?;
@@ -279,8 +402,13 @@ impl Game {
         self.settle()
     }
 
+    fn dealer_has_blackjack(&self) -> bool {
+        self.dealer.len() == 2 && hand_value(&self.dealer).total == 21
+    }
+
     fn settle(&mut self) -> Result<(), GameError> {
-        let dealer_blackjack = self.dealer.len() == 2 && hand_value(&self.dealer).total == 21;
+        let dealer_blackjack = self.dealer_has_blackjack();
+        // No need to draw against only busts, surrenders, or a natural.
         if !dealer_blackjack
             && self
                 .hands
@@ -439,6 +567,148 @@ fn practice_values(target: Situation) -> Option<([u8; 3], usize)> {
     None
 }
 
+struct GameState<'a> {
+    dealer: &'a [Card],
+    hands: &'a [PlayerHand],
+    active: usize,
+    phase: Phase,
+    result: Option<&'a RoundResult>,
+    shoe: &'a [Card],
+    insured: bool,
+    splits_used: usize,
+}
+
+fn validate_snapshot(snapshot: &GameSnapshot) -> Result<(), GameError> {
+    validate_game_state(GameState {
+        dealer: &snapshot.dealer,
+        hands: &snapshot.hands,
+        active: snapshot.active,
+        phase: snapshot.phase,
+        result: snapshot.result.as_ref(),
+        shoe: &snapshot.shoe,
+        insured: snapshot.insured,
+        splits_used: snapshot.splits_used,
+    })
+}
+
+fn validate_game_state(state: GameState<'_>) -> Result<(), GameError> {
+    let GameState {
+        dealer,
+        hands,
+        active,
+        phase,
+        result,
+        shoe,
+        insured,
+        splits_used,
+    } = state;
+    if shoe.len() > 312
+        || hands.len() > 4
+        || splits_used > 3
+        || hands
+            .iter()
+            .any(|hand| hand.cards.is_empty() || !matches!(hand.wager_half_units, 2 | 4))
+    {
+        return Err(GameError::InvalidSnapshot(
+            "invalid card, hand, wager, or split count".to_owned(),
+        ));
+    }
+    let mut cards: Vec<(Card, usize)> = Vec::with_capacity(52);
+    for card in shoe
+        .iter()
+        .chain(dealer.iter())
+        .chain(hands.iter().flat_map(|hand| hand.cards.iter()))
+    {
+        if let Some((_, count)) = cards.iter_mut().find(|(known, _)| known == card) {
+            *count += 1;
+            if *count > 6 {
+                return Err(GameError::InvalidSnapshot(
+                    "a physical card appears more than six times".to_owned(),
+                ));
+            }
+        } else {
+            cards.push((*card, 1));
+        }
+    }
+    if cards.iter().map(|(_, count)| count).sum::<usize>() > 312 {
+        return Err(GameError::InvalidSnapshot(
+            "saved cards exceed a six-deck shoe".to_owned(),
+        ));
+    }
+    if dealer.len() == 1 {
+        return Err(GameError::InvalidSnapshot(
+            "dealer must have zero or at least two cards".to_owned(),
+        ));
+    }
+    if result.is_some_and(|result| {
+        result.net_half_units
+            != result
+                .outcomes
+                .iter()
+                .map(|outcome| outcome.net_half_units)
+                .sum::<i32>()
+    }) {
+        return Err(GameError::InvalidSnapshot(
+            "round result total does not match its outcomes".to_owned(),
+        ));
+    }
+    let prior_hand_playing = active < hands.len()
+        && hands[..active]
+            .iter()
+            .any(|hand| hand.status == HandStatus::Playing);
+    match phase {
+        Phase::Ready => {
+            if !dealer.is_empty()
+                || !hands.is_empty()
+                || result.is_some()
+                || active != 0
+                || insured
+                || splits_used != 0
+            {
+                return Err(GameError::InvalidSnapshot(
+                    "ready game contains round state".to_owned(),
+                ));
+            }
+        }
+        Phase::Insurance | Phase::Playing => {
+            if dealer.len() != 2
+                || hands.is_empty()
+                || active >= hands.len()
+                || result.is_some()
+                || shoe.is_empty()
+                || hands[active].status != HandStatus::Playing
+                || prior_hand_playing
+                || (phase == Phase::Insurance
+                    && (dealer[0].rank != Rank::Ace
+                        || hands.len() != 1
+                        || active != 0
+                        || splits_used != 0
+                        || insured))
+            {
+                return Err(GameError::InvalidSnapshot(
+                    "active game is missing round state".to_owned(),
+                ));
+            }
+        }
+        Phase::Finished => {
+            if dealer.len() < 2
+                || hands.is_empty()
+                || active != hands.len()
+                || result.is_none()
+                || hands.iter().any(|hand| hand.status != HandStatus::Settled)
+                || result.is_some_and(|result| {
+                    result.outcomes.len() != hands.len() + usize::from(insured)
+                })
+            {
+                return Err(GameError::InvalidSnapshot(
+                    "finished game is missing settlement state".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_practice_target(target: Situation) -> Result<Option<([u8; 3], usize)>, &'static str> {
     if !(2..=11).contains(&target.dealer) {
         return Err("dealer upcard must be 2 through ace");
@@ -477,7 +747,6 @@ fn validate_practice_target(target: Situation) -> Result<Option<([u8; 3], usize)
         .map(Some)
         .ok_or("no playable card composition has this total and action availability")
 }
-
 pub(crate) fn valid_practice_situation(target: Situation) -> bool {
     validate_practice_target(target).is_ok()
 }
@@ -556,20 +825,51 @@ mod tests {
         assert_eq!(net(&push), 0);
         assert!(push.result.unwrap().dealer_blackjack);
     }
+    #[test]
+    fn deserializing_invalid_game_rejects_before_state_use() {
+        let mut value = serde_json::to_value(Game::new(1)).unwrap();
+        value["phase"] = serde_json::json!("Playing");
+        assert!(serde_json::from_value::<Game>(value).is_err());
+    }
 
     #[test]
-    fn no_look_double_refund_and_insurance_are_separate() {
-        let mut game = rig(&[5, 11, 6, 10, 10]);
-        game.act(Action::Insure).unwrap();
-        assert_eq!(game.phase, Phase::Playing);
-        assert!(game.situation().unwrap().can_double);
-        game.act(Action::Double).unwrap();
-        assert_eq!(game.hands[0].cards.len(), 3);
-        assert_eq!(game.hands[0].wager_half_units, 4);
-        let result = game.result.unwrap();
+    fn insurance_snapshot_requires_an_ace_upcard() {
+        let mut snapshot = rig(&[5, 6, 10, 9]).snapshot();
+        snapshot.phase = Phase::Insurance;
+        snapshot.dealer[0].rank = Rank::Ten;
+        assert!(Game::from_snapshot(snapshot).is_err());
+    }
+
+    #[test]
+    fn dealer_blackjack_settles_immediately_after_insurance() {
+        let mut insured = rig(&[5, 11, 6, 10, 10]);
+        insured.act(Action::Insure).unwrap();
+        assert_eq!(insured.phase, Phase::Finished);
+        insured.validate().unwrap();
+        assert!(insured.situation().is_none());
+        assert_eq!(
+            insured.act(Action::Double),
+            Err(GameError::NoActiveDecision)
+        );
+        let result = insured.result.unwrap();
         assert_eq!(result.net_half_units, 0);
         assert_eq!(result.outcomes[0].net_half_units, -2);
         assert_eq!(result.outcomes[1].net_half_units, 2);
+
+        let mut declined = rig(&[5, 11, 6, 10]);
+        declined.act(Action::DeclineInsurance).unwrap();
+        assert_eq!(declined.phase, Phase::Finished);
+        declined.validate().unwrap();
+        assert_eq!(declined.act(Action::Hit), Err(GameError::NoActiveDecision));
+        assert_eq!(net(&declined), -2);
+    }
+
+    #[test]
+    fn insurance_can_continue_when_dealer_has_no_blackjack() {
+        let mut game = rig(&[5, 11, 6, 9]);
+        game.act(Action::Insure).unwrap();
+        assert_eq!(game.phase, Phase::Playing);
+        assert!(game.situation().is_some());
     }
 
     #[test]
@@ -588,12 +888,19 @@ mod tests {
 
     #[test]
     fn late_surrender_is_conditional_and_never_after_hit_or_split() {
-        for (hole, expected) in [(10, -2), (9, -1)] {
-            let mut game = rig(&[10, 11, 6, hole]);
-            game.act(Action::DeclineInsurance).unwrap();
-            game.act(Action::Surrender).unwrap();
-            assert_eq!(net(&game), expected);
-        }
+        let mut dealer_blackjack = rig(&[10, 11, 6, 10]);
+        dealer_blackjack.act(Action::DeclineInsurance).unwrap();
+        assert_eq!(dealer_blackjack.phase, Phase::Finished);
+        assert_eq!(net(&dealer_blackjack), -2);
+        assert_eq!(
+            dealer_blackjack.act(Action::Surrender),
+            Err(GameError::NoActiveDecision)
+        );
+
+        let mut surrender = rig(&[10, 11, 6, 9]);
+        surrender.act(Action::DeclineInsurance).unwrap();
+        surrender.act(Action::Surrender).unwrap();
+        assert_eq!(net(&surrender), -1);
         let mut hit = rig(&[2, 10, 3, 8, 2]);
         hit.act(Action::Hit).unwrap();
         assert!(!hit.situation().unwrap().can_surrender);
@@ -725,14 +1032,16 @@ mod tests {
     }
 
     #[test]
-    fn hole_card_never_changes_legal_actions() {
+    fn hole_card_is_checked_after_insurance_decision() {
         let mut natural = rig(&[8, 11, 8, 10]);
         let mut other = rig(&[8, 11, 8, 9]);
         assert_eq!(natural.situation(), other.situation());
         natural.act(Action::DeclineInsurance).unwrap();
         other.act(Action::DeclineInsurance).unwrap();
-        assert_eq!(natural.situation(), other.situation());
-        assert_eq!(natural.phase, Phase::Playing);
+        assert_eq!(natural.phase, Phase::Finished);
+        assert_eq!(other.phase, Phase::Playing);
+        assert!(natural.situation().is_none());
+        assert!(other.situation().is_some());
     }
 
     #[test]
@@ -858,6 +1167,28 @@ mod tests {
         assert!(suits.iter().any(|suit| *suit != suits[0]));
         assert!(ten_ranks.iter().any(|rank| *rank != ten_ranks[0]));
     }
+    #[test]
+    fn rejects_active_snapshot_with_no_undealt_cards() {
+        let mut snapshot = Game::new(22).snapshot();
+        let cards = std::mem::take(&mut snapshot.shoe);
+        snapshot.dealer = cards[..2].to_vec();
+        snapshot.hands = vec![PlayerHand {
+            cards: cards[2..].to_vec(),
+            wager_half_units: BASE_BET,
+            status: HandStatus::Playing,
+            from_split: false,
+            split_aces: false,
+        }];
+        snapshot.active = 0;
+        snapshot.phase = Phase::Playing;
+        snapshot.result = None;
+        snapshot.insured = false;
+        assert!(matches!(
+            Game::from_snapshot(snapshot),
+            Err(GameError::InvalidSnapshot(_))
+        ));
+    }
+
     #[test]
     fn malformed_or_exhausted_state_returns_errors_instead_of_panicking() {
         let mut missing_dealer = Game::new(1);
