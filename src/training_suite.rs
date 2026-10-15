@@ -543,6 +543,10 @@ impl RunningCountDrill {
         if self.checkpoint.prompt {
             return Ok(RunningCountAdvance::CountPrompt);
         }
+        if self.round_complete && self.frames.is_empty() {
+            self.start_round()?;
+            return Ok(RunningCountAdvance::ShowingCards);
+        }
         if self.frames.is_empty() {
             return Err(GameError::InvalidState(
                 "no Running Count round has started",
@@ -566,6 +570,21 @@ impl RunningCountDrill {
 
     pub fn current_game(&self) -> &Game {
         self.frames.get(self.frame_index).unwrap_or(&self.game)
+    }
+
+    /// Reports whether the current round still has cards to render.
+    pub fn cards_visible(&self) -> bool {
+        !self.frames.is_empty()
+    }
+
+    /// Clears the rendered round while preserving the settled shoe for the next deal.
+    pub fn clear_cards(&mut self) {
+        self.frames.clear();
+        self.frame_index = 0;
+    }
+    /// Reports whether the current round has settled and is ready to clear.
+    pub fn round_complete(&self) -> bool {
+        self.round_complete
     }
 
     pub fn running_count(&self) -> i32 {

@@ -251,11 +251,18 @@ pub fn counting_card(ui: &mut egui::Ui, card: Card) {
     });
     paint_card(ui, rect, Some(card));
 }
-fn cards(ui: &mut egui::Ui, cards: &[Card], hide_hole: bool) {
-    cards_with_size(ui, cards, hide_hole, vec2(52.0, 74.0));
-}
 
 fn cards_with_size(ui: &mut egui::Ui, cards: &[Card], hide_hole: bool, card_size: Vec2) {
+    cards_with_slide(ui, cards, hide_hole, card_size, 1.0);
+}
+
+fn cards_with_slide(
+    ui: &mut egui::Ui,
+    cards: &[Card],
+    hide_hole: bool,
+    card_size: Vec2,
+    slide_progress: f32,
+) {
     let count = cards.len().max(2);
     let step = ((ui.available_width() - card_size.x) / (count - 1) as f32)
         .clamp(card_size.x * 0.32, card_size.x * 0.9);
@@ -278,15 +285,22 @@ fn cards_with_size(ui: &mut egui::Ui, cards: &[Card], hide_hole: bool, card_size
         egui::WidgetInfo::labeled(egui::WidgetType::Image, true, label)
     });
     let start = pos2(rect.center().x - width / 2.0, rect.top());
+    let slide_progress = slide_progress.clamp(0.0, 1.0);
     for index in 0..count {
         let card = if hide_hole && index > 0 {
             None
         } else {
             cards.get(index).copied()
         };
+        let stagger = index as f32 * 0.08;
+        let card_progress =
+            ((slide_progress - stagger) / (1.0 - stagger).max(0.01)).clamp(0.0, 1.0);
         paint_card(
             ui,
-            egui::Rect::from_min_size(start + vec2(step * index as f32, 0.0), card_size),
+            egui::Rect::from_min_size(
+                start + vec2((1.0 - card_progress) * card_size.x * 1.1, 0.0),
+                card_size,
+            ),
             card,
         );
     }
@@ -354,6 +368,10 @@ pub fn discard_tray(ui: &mut egui::Ui, cards: &[Card], angle: u8) {
 }
 
 pub fn game_table(ui: &mut egui::Ui, game: &Game) {
+    game_table_with_slide(ui, game, 1.0);
+}
+
+pub fn game_table_with_slide(ui: &mut egui::Ui, game: &Game, slide_progress: f32) {
     egui::Frame::NONE
         .fill(FELT)
         .corner_radius(16)
@@ -364,7 +382,13 @@ pub fn game_table(ui: &mut egui::Ui, game: &Game) {
             ui.set_min_width(ui.available_width());
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new("DEALER").size(11.0).color(GREEN).strong());
-                cards(ui, &game.dealer, game.phase != Phase::Finished);
+                cards_with_slide(
+                    ui,
+                    &game.dealer,
+                    game.phase != Phase::Finished,
+                    vec2(52.0, 74.0),
+                    slide_progress,
+                );
                 if game.phase == Phase::Finished {
                     let value = hand_value(&game.dealer);
                     ui.label(
@@ -389,7 +413,7 @@ pub fn game_table(ui: &mut egui::Ui, game: &Game) {
             if game.hands.is_empty() {
                 ui.vertical_centered(|ui| {
                     ui.label(RichText::new("YOUR HAND").size(11.0).color(GREEN).strong());
-                    cards(ui, &[], false);
+                    cards_with_slide(ui, &[], false, vec2(52.0, 74.0), slide_progress);
                     muted(ui, "Train the decision. Not the outcome.");
                 });
             } else {
@@ -420,7 +444,13 @@ pub fn game_table(ui: &mut egui::Ui, game: &Game) {
                                                 .color(if active { GREEN } else { MUTED })
                                                 .strong(),
                                         );
-                                        cards(ui, &hand.cards, false);
+                                        cards_with_slide(
+                                            ui,
+                                            &hand.cards,
+                                            false,
+                                            vec2(52.0, 74.0),
+                                            slide_progress,
+                                        );
                                         let value = hand_value(&hand.cards);
                                         ui.label(
                                             RichText::new(format!(

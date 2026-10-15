@@ -70,6 +70,8 @@ enum SuiteActivity {
     Assessment(AssessmentSession),
     PressureTable(PressureTable),
 }
+const RUNNING_COUNT_ROUND_CLEAR_PAUSE: Duration = Duration::from_secs(3);
+const RUNNING_COUNT_CARD_SLIDE_DURATION: Duration = Duration::from_millis(280);
 
 enum Command {
     Deal,
@@ -134,6 +136,8 @@ pub struct TrainerApp {
     suite_pressure_prompt_started_at: Option<Instant>,
     suite_pressure_decision_started_at: Option<Instant>,
     suite_running_next_step_at: Option<Instant>,
+    suite_running_clear_at: Option<Instant>,
+    suite_running_step_started_at: Option<Instant>,
     suite_started_at: Option<Instant>,
     suite_elapsed: Duration,
     suite_seed: u64,
@@ -251,6 +255,8 @@ impl TrainerApp {
             suite_pressure_prompt_started_at: None,
             suite_pressure_decision_started_at: None,
             suite_running_next_step_at: None,
+            suite_running_clear_at: None,
+            suite_running_step_started_at: None,
             suite_started_at: None,
             suite_elapsed: Duration::ZERO,
             suite_seed: rand::random(),
@@ -430,11 +436,14 @@ impl TrainerApp {
         self.suite_pressure_prompt_started_at = None;
         self.suite_pressure_decision_started_at = None;
         self.suite_running_next_step_at = None;
+        self.suite_running_clear_at = None;
+        self.suite_running_step_started_at = None;
         self.suite_elapsed = Duration::ZERO;
         self.suite_attempts = 0;
         self.suite_correct = 0;
         self.suite_mistakes.clear();
-        self.suite_started_at = Some(Instant::now());
+        let started_at = Instant::now();
+        self.suite_started_at = Some(started_at);
         let settings = self.profile.suite_settings.clone();
         let activity = match tool {
             ToolId::RunningCount => {
@@ -475,8 +484,8 @@ impl TrainerApp {
         };
         self.suite = Some(activity);
         if matches!(tool, ToolId::RunningCount) {
-            self.suite_running_next_step_at =
-                Some(Instant::now() + self.running_count_step_delay());
+            self.suite_running_next_step_at = Some(started_at + self.running_count_step_delay());
+            self.suite_running_step_started_at = Some(started_at);
         }
         self.page = Page::TrainingSuite;
     }
@@ -517,6 +526,23 @@ impl TrainerApp {
         self.suite_pressure_prompt_started_at = Some(Instant::now());
     }
     fn tick_running_count(&mut self, now: Instant) {
+        if let Some(clear_at) = self.suite_running_clear_at {
+            if now < clear_at {
+                return;
+            }
+            if let Some(SuiteActivity::RunningCount(drill)) = self.suite.as_mut() {
+                drill.clear_cards();
+            } else {
+                self.suite_running_clear_at = None;
+                self.suite_running_next_step_at = None;
+                return;
+            }
+            self.suite_running_clear_at = None;
+            self.suite_running_step_started_at = Some(now);
+            self.suite_running_next_step_at = Some(now + self.running_count_step_delay());
+            return;
+        }
+
         let Some(next_step) = self.suite_running_next_step_at else {
             return;
         };
@@ -527,23 +553,45 @@ impl TrainerApp {
             Some(SuiteActivity::RunningCount(drill)) => drill.advance(),
             _ => {
                 self.suite_running_next_step_at = None;
+                self.suite_running_step_started_at = None;
                 return;
             }
         };
         match outcome {
             Ok(RunningCountAdvance::CountPrompt) => {
                 self.suite_running_next_step_at = None;
+                self.suite_running_clear_at = Some(now + RUNNING_COUNT_ROUND_CLEAR_PAUSE);
+                self.suite_running_step_started_at = Some(now);
                 self.suite_input = "0".to_owned();
                 self.suite_message = None;
             }
             Ok(RunningCountAdvance::ShowingCards) => {
-                self.suite_running_next_step_at = Some(now + self.running_count_step_delay());
+                self.suite_running_step_started_at = Some(now);
+                let round_complete = matches!(
+                    self.suite.as_ref(),
+                    Some(SuiteActivity::RunningCount(drill)) if drill.round_complete()
+                );
+                if round_complete {
+                    self.suite_running_next_step_at = None;
+                    self.suite_running_clear_at = Some(now + RUNNING_COUNT_ROUND_CLEAR_PAUSE);
+                } else {
+                    self.suite_running_next_step_at = Some(now + self.running_count_step_delay());
+                }
             }
             Err(error) => {
                 self.suite_running_next_step_at = None;
+                self.suite_running_step_started_at = None;
                 self.error = Some(format!("Running Count could not advance: {error}"));
             }
         }
+    }
+
+    fn running_count_card_progress(&self, now: Instant) -> f32 {
+        let Some(started_at) = self.suite_running_step_started_at else {
+            return 1.0;
+        };
+        let elapsed = now.checked_duration_since(started_at).unwrap_or_default();
+        (elapsed.as_secs_f32() / RUNNING_COUNT_CARD_SLIDE_DURATION.as_secs_f32()).min(1.0)
     }
 
     fn suite_finish(&mut self, tool: ToolId, finished: bool, passed: Option<bool>) {
@@ -553,6 +601,9 @@ impl TrainerApp {
             .map_or(self.suite_elapsed, |started| started.elapsed());
         self.suite_elapsed = elapsed;
         self.suite_pressure_decision_started_at = None;
+        self.suite_running_next_step_at = None;
+        self.suite_running_clear_at = None;
+        self.suite_running_step_started_at = None;
         let session = ToolSession {
             tool,
             elapsed_secs: elapsed.as_secs(),
@@ -1084,8 +1135,11 @@ impl TrainerApp {
                             )
                         });
                     } else {
-                        self.suite_running_next_step_at =
-                            Some(Instant::now() + self.running_count_step_delay());
+                        self.suite_running_next_step_at = None;
+                        if self.suite_running_clear_at.is_none() {
+                            self.suite_running_clear_at =
+                                Some(Instant::now() + RUNNING_COUNT_ROUND_CLEAR_PAUSE);
+                        }
                         self.suite_message = (!feedback.correct).then(|| {
                             format!("Wrong · actual running count: {:+}", feedback.expected)
                         });
@@ -1246,15 +1300,21 @@ impl eframe::App for TrainerApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
         self.tick_running_count(Instant::now());
-        ctx.request_repaint_after(
-            if (self.page == Page::Counting && self.counting_started_at.is_some())
-                || (self.page == Page::TrainingSuite && self.suite_started_at.is_some())
-            {
-                Duration::from_millis(100)
-            } else {
-                Duration::from_secs(30)
-            },
-        );
+        let running_count_animation_active =
+            matches!(self.suite.as_ref(), Some(SuiteActivity::RunningCount(_)))
+                && (self.suite_running_next_step_at.is_some()
+                    || self.suite_running_clear_at.is_some());
+        let repaint_after = if self.page == Page::Counting && self.counting_started_at.is_some() {
+            Duration::from_millis(100)
+        } else if running_count_animation_active {
+            Duration::from_millis(16)
+        } else if self.page == Page::TrainingSuite && self.suite_started_at.is_some() {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(30)
+        };
+        ctx.request_repaint_after(repaint_after);
+
         let true_count_timed_out = matches!(
             self.suite.as_ref(),
             Some(SuiteActivity::TrueCount(drill))

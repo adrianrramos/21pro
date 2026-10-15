@@ -21,7 +21,7 @@ The shipped set is exactly insurance +3; I18 hard plays 16v10 +0, 15v10 +4, 10v1
 
 ## Scope notes
 
-- Running Count persists the reference delay scale (800 ms displays as dealing speed 6) alongside the checkpoint interval; the active table has no learner action buttons or discard-tray controls.
+- Running Count persists the reference delay scale (800 ms displays as dealing speed 6) alongside the checkpoint interval; cards slide into each state and clear after a three-second recall pause once a round settles.
 - Running Count automatically plays each round with the local basic strategy and dealer H17 flow; the face-down hole is excluded until the automatic dealer reveal, then the exact integer count is prompted.
 - True Count uses stepped whole/half-deck divisors, truncation toward zero, and the documented quarter-deck alternate.
 - Assessment is a local three-shoe suite session and is distinct from the existing 250-round baseline assessment.

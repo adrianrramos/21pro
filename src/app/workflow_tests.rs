@@ -298,6 +298,54 @@ fn running_count_speed_setting_persists_and_rejects_invalid_labels() {
 }
 
 #[test]
+fn running_count_pauses_then_clears_before_next_deal() {
+    let ctx = eframe::egui::Context::default();
+    let mut app = TrainerApp::fixture(&ctx, Fixture::TrainingSuite).unwrap();
+    app.profile.suite_settings.count_every = None;
+    app.suite_seed = 7;
+    app.execute(Command::StartSuite(ToolId::RunningCount));
+
+    let mut now = Instant::now() + Duration::from_secs(10);
+    let clear_at = (0..200)
+        .find_map(|_| {
+            app.tick_running_count(now);
+            if let Some(clear_at) = app.suite_running_clear_at {
+                Some(clear_at)
+            } else {
+                now += Duration::from_secs(1);
+                None
+            }
+        })
+        .expect("automatic round should schedule a clear pause");
+    assert_eq!(clear_at, now + Duration::from_secs(3));
+    assert!(matches!(
+        app.suite.as_ref(),
+        Some(SuiteActivity::RunningCount(drill)) if drill.cards_visible()
+    ));
+
+    app.tick_running_count(now + Duration::from_secs(2));
+    assert!(matches!(
+        app.suite.as_ref(),
+        Some(SuiteActivity::RunningCount(drill)) if drill.cards_visible()
+    ));
+
+    app.tick_running_count(clear_at);
+    assert!(matches!(
+        app.suite.as_ref(),
+        Some(SuiteActivity::RunningCount(drill)) if !drill.cards_visible()
+    ));
+    let next_deal_at = app
+        .suite_running_next_step_at
+        .expect("clearing schedules the next deal");
+    app.tick_running_count(next_deal_at);
+    assert!(matches!(
+        app.suite.as_ref(),
+        Some(SuiteActivity::RunningCount(drill)) if drill.cards_visible()
+    ));
+    assert!(app.running_count_card_progress(next_deal_at) <= f32::EPSILON);
+}
+
+#[test]
 fn true_count_active_surface_exposes_tray_angles_and_answer_card() {
     let mut harness = active_suite(ToolId::TrueCount);
     harness.get_by_label("DISCARD TRAY");

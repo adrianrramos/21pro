@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{Command, Page, SuiteActivity, TrainerApp, widgets as w};
 use eframe::egui::{self, RichText, Stroke, vec2};
@@ -988,6 +988,7 @@ impl TrainerApp {
             ui.add_space(8.0);
         }
         let suite_settings = self.profile.suite_settings.clone();
+        let running_count_slide = self.running_count_card_progress(Instant::now());
         match self.suite.as_mut() {
             Some(SuiteActivity::RunningCount(drill)) => {
                 w::heading(
@@ -995,9 +996,24 @@ impl TrainerApp {
                     "Running Count",
                     "Watch the automatic round, then enter the exact Hi-Lo count.",
                 );
-                let game = drill.current_game();
                 ui.columns(3, |columns| {
-                    w::game_table(&mut columns[0], game);
+                    if drill.cards_visible() {
+                        w::game_table_with_slide(
+                            &mut columns[0],
+                            drill.current_game(),
+                            running_count_slide,
+                        );
+                    } else {
+                        w::panel().inner_margin(18).show(&mut columns[0], |ui| {
+                            w::eyebrow(ui, "ROUND PAUSE");
+                            ui.label(
+                                RichText::new("Cards cleared")
+                                    .size(22.0)
+                                    .strong(),
+                            );
+                            w::muted(ui, "Recall the running count before the next deal.");
+                        });
+                    }
                     w::panel().inner_margin(16).show(&mut columns[1], |ui| {
                         if drill.checkpoint.prompt {
                             ui.vertical_centered(|ui| {
