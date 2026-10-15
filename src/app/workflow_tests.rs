@@ -1,10 +1,11 @@
 //! Simulated input against the real eframe app; no renderer or process-global test state.
-use super::{Command, Page, TrainerApp, fixtures::Fixture};
+use super::{Command, Page, SuiteActivity, TrainerApp, fixtures::Fixture};
 use eframe::egui::{Key, accesskit::Role, vec2};
 use egui_kittest::{
     Harness,
     kittest::{NodeT, Queryable},
 };
+use std::time::{Duration, Instant};
 use twenty_one_pro::training_suite::ToolId;
 
 type AppHarness = Harness<'static, TrainerApp>;
@@ -223,25 +224,77 @@ fn training_suite_menu_exposes_cards_settings_and_current_lifetime_stats() {
             .is_some()
     );
     harness.get_by_label("End of shoe");
-    harness.get_by_label("Every 1");
+    harness.get_by_label("1 round");
     harness.get_by_label("Training Stats");
     harness.get_by_label("Start Running Count");
     harness.get_by_label("Start True Count");
 }
 
 #[test]
-fn running_count_active_surface_shows_real_cards_and_discard_state() {
+fn running_count_active_surface_shows_automatic_table_and_preferences() {
     let harness = active_suite(ToolId::RunningCount);
     harness.get_by_label("DEALER");
+    assert!(harness.query_by_label("DISCARD TRAY").is_none());
+    harness.get_by_label("AUTOMATIC DEAL");
+    harness.get_by_label("PREFERENCES");
+    harness.get_by_label("Dealing speed: 6");
+    harness.get_by_label_contains("Penetration");
+}
+#[test]
+fn running_count_auto_deals_and_grades_a_wrong_count() {
+    let ctx = eframe::egui::Context::default();
+    let mut app = TrainerApp::fixture(&ctx, Fixture::TrainingSuite).unwrap();
+    app.suite_seed = 7;
+    app.execute(Command::StartSuite(ToolId::RunningCount));
+
+    let mut now = Instant::now() + Duration::from_secs(10);
+    let mut prompted = false;
+    for _ in 0..100 {
+        app.tick_running_count(now);
+        if matches!(
+            app.suite.as_ref(),
+            Some(SuiteActivity::RunningCount(drill)) if drill.checkpoint.prompt
+        ) {
+            prompted = true;
+            break;
+        }
+        now += Duration::from_secs(1);
+    }
+    assert!(prompted, "automatic round should reach a count prompt");
+
+    let expected = match app.suite.as_ref() {
+        Some(SuiteActivity::RunningCount(drill)) => drill.running_count(),
+        _ => panic!("Running Count should remain active at the prompt"),
+    };
+    app.suite_input = (expected + 1).to_string();
+    app.execute(Command::SuiteSubmit);
+    assert_eq!(app.suite_attempts, 1);
+    assert_eq!(app.suite_correct, 0);
     assert!(
-        harness
-            .query_all_by_label_contains("Cards:")
-            .next()
-            .is_some()
+        app.suite_message
+            .as_deref()
+            .is_some_and(|message| message.contains(&format!("{expected:+}")))
     );
-    harness.get_by_label("DISCARD TRAY");
-    harness.get_by_label("COUNT STATE");
-    harness.get_by_label("Reveal hole and finish round");
+}
+#[test]
+fn running_count_speed_setting_persists_and_rejects_invalid_labels() {
+    let ctx = eframe::egui::Context::default();
+    let mut app = TrainerApp::fixture(&ctx, Fixture::TrainingSuite).unwrap();
+
+    app.execute(Command::SuiteSetDealingSpeed(0));
+    assert_eq!(app.profile.suite_settings.dealing_delay_ms, 2_000);
+    app.execute(Command::SuiteSetDealingSpeed(11));
+    assert_eq!(app.profile.suite_settings.dealing_delay_ms, 2_000);
+    assert_eq!(
+        app.store
+            .as_ref()
+            .unwrap()
+            .load()
+            .unwrap()
+            .suite_settings
+            .dealing_delay_ms,
+        2_000
+    );
 }
 
 #[test]

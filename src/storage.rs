@@ -173,6 +173,10 @@ fn validate(profile: &Profile) -> Result<(), StorageError> {
             profile.suite_settings.true_count_duration_secs,
             90 | 150 | 300 | 600
         )
+        || !matches!(
+            profile.suite_settings.dealing_delay_ms,
+            0 | 200 | 400 | 600 | 800 | 1_000 | 1_200 | 1_400 | 1_600 | 1_800 | 2_000
+        )
         || profile
             .suite_settings
             .count_every

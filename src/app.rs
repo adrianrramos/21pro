@@ -23,8 +23,8 @@ use twenty_one_pro::{
     training::{Analytics, CellStats, Profile, StudyMode},
     training_suite::{
         AssessmentSession, BasicStrategyDrill, CoreIndexDrill, DrillFeedback, GradeBucket,
-        PressurePrompt, PressureTable, RunningCountDrill, TablePractice, ToolId, ToolSession,
-        TrueCountDrill, pressure_answer,
+        PressurePrompt, PressureTable, RunningCountAdvance, RunningCountDrill, TablePractice,
+        ToolId, ToolSession, TrueCountDrill, dealing_delay_for_speed, pressure_answer,
     },
 };
 
@@ -80,9 +80,10 @@ enum Command {
     NextCounting,
     FinishCounting,
     SubmitCounting,
-    StartSuite(ToolId),
     SuiteAct(Action),
+    StartSuite(ToolId),
     SuiteSetCountEvery(Option<usize>),
+    SuiteSetDealingSpeed(u8),
     SuiteTrueCountAngle(i8),
     SuiteAdjustInput(i32),
     SuiteSetInput(i32),
@@ -91,7 +92,7 @@ enum Command {
     SuiteSetTrueCountDuration(u64),
     ResetSuiteCurrent,
     SuiteNext,
-    SuiteReveal,
+    SuiteRestart,
     SuiteSubmit,
     SuiteEnd,
     SuiteCompleteShoe,
@@ -132,6 +133,7 @@ pub struct TrainerApp {
     suite_pressure_prompt: Option<PressurePrompt>,
     suite_pressure_prompt_started_at: Option<Instant>,
     suite_pressure_decision_started_at: Option<Instant>,
+    suite_running_next_step_at: Option<Instant>,
     suite_started_at: Option<Instant>,
     suite_elapsed: Duration,
     suite_seed: u64,
@@ -248,6 +250,7 @@ impl TrainerApp {
             suite_pressure_prompt: None,
             suite_pressure_prompt_started_at: None,
             suite_pressure_decision_started_at: None,
+            suite_running_next_step_at: None,
             suite_started_at: None,
             suite_elapsed: Duration::ZERO,
             suite_seed: rand::random(),
@@ -409,6 +412,11 @@ impl TrainerApp {
             self.practice_target = None;
         }
     }
+    fn running_count_step_delay(&self) -> Duration {
+        Duration::from_millis(
+            u64::from(self.profile.suite_settings.dealing_delay_ms).saturating_add(80),
+        )
+    }
 
     fn start_suite(&mut self, tool: ToolId) {
         let seed = self.suite_seed;
@@ -421,6 +429,7 @@ impl TrainerApp {
         self.suite_pressure_prompt = None;
         self.suite_pressure_prompt_started_at = None;
         self.suite_pressure_decision_started_at = None;
+        self.suite_running_next_step_at = None;
         self.suite_elapsed = Duration::ZERO;
         self.suite_attempts = 0;
         self.suite_correct = 0;
@@ -429,7 +438,13 @@ impl TrainerApp {
         let settings = self.profile.suite_settings.clone();
         let activity = match tool {
             ToolId::RunningCount => {
-                SuiteActivity::RunningCount(RunningCountDrill::new(seed, settings.count_every))
+                let mut drill = RunningCountDrill::new(seed, settings.count_every);
+                if let Err(error) = drill.start_round() {
+                    self.suite_started_at = None;
+                    self.error = Some(format!("Cannot start Running Count drill: {error}"));
+                    return;
+                }
+                SuiteActivity::RunningCount(drill)
             }
             ToolId::TrueCount => match TrueCountDrill::new(
                 seed,
@@ -459,6 +474,10 @@ impl TrainerApp {
             }
         };
         self.suite = Some(activity);
+        if matches!(tool, ToolId::RunningCount) {
+            self.suite_running_next_step_at =
+                Some(Instant::now() + self.running_count_step_delay());
+        }
         self.page = Page::TrainingSuite;
     }
 
@@ -496,6 +515,35 @@ impl TrainerApp {
         };
         self.suite_pressure_prompt = Some(prompt);
         self.suite_pressure_prompt_started_at = Some(Instant::now());
+    }
+    fn tick_running_count(&mut self, now: Instant) {
+        let Some(next_step) = self.suite_running_next_step_at else {
+            return;
+        };
+        if now < next_step {
+            return;
+        }
+        let outcome = match self.suite.as_mut() {
+            Some(SuiteActivity::RunningCount(drill)) => drill.advance(),
+            _ => {
+                self.suite_running_next_step_at = None;
+                return;
+            }
+        };
+        match outcome {
+            Ok(RunningCountAdvance::CountPrompt) => {
+                self.suite_running_next_step_at = None;
+                self.suite_input = "0".to_owned();
+                self.suite_message = None;
+            }
+            Ok(RunningCountAdvance::ShowingCards) => {
+                self.suite_running_next_step_at = Some(now + self.running_count_step_delay());
+            }
+            Err(error) => {
+                self.suite_running_next_step_at = None;
+                self.error = Some(format!("Running Count could not advance: {error}"));
+            }
+        }
     }
 
     fn suite_finish(&mut self, tool: ToolId, finished: bool, passed: Option<bool>) {
@@ -682,6 +730,15 @@ impl TrainerApp {
             Command::SuiteSetCountEvery(interval) => {
                 if interval.is_none_or(|value| matches!(value, 1 | 3 | 5 | 10 | 25)) {
                     self.profile.suite_settings.count_every = interval;
+                    if let Some(SuiteActivity::RunningCount(drill)) = self.suite.as_mut() {
+                        drill.interval = interval;
+                    }
+                    self.persist_progress();
+                }
+            }
+            Command::SuiteSetDealingSpeed(speed) => {
+                if let Some(delay) = dealing_delay_for_speed(speed) {
+                    self.profile.suite_settings.dealing_delay_ms = delay;
                     self.persist_progress();
                 }
             }
@@ -719,11 +776,6 @@ impl TrainerApp {
             }
             Command::StartSuite(tool) => {
                 self.start_suite(tool);
-                if let Some(SuiteActivity::RunningCount(drill)) = self.suite.as_mut()
-                    && let Err(error) = drill.start_round()
-                {
-                    self.error = Some(format!("Cannot start count round: {error}"));
-                }
                 if let Some(SuiteActivity::PressureTable(table)) = self.suite.as_mut() {
                     match table.deal() {
                         Ok(()) => {
@@ -828,11 +880,7 @@ impl TrainerApp {
                 let mut pressure_dealt = false;
                 let mut pressure_event = false;
                 match self.suite.as_mut() {
-                    Some(SuiteActivity::RunningCount(drill)) => {
-                        if let Err(error) = drill.start_round() {
-                            self.error = Some(format!("Cannot start count round: {error}"));
-                        }
-                    }
+                    Some(SuiteActivity::RunningCount(_)) => {}
                     Some(SuiteActivity::TrueCount(_)) => {
                         let seed = self.suite_seed;
                         self.suite_seed = self.suite_seed.wrapping_add(1);
@@ -898,44 +946,21 @@ impl TrainerApp {
                     self.suite_message = Some(format!("{} drill complete.", tool.label()));
                 }
             }
-            Command::SuiteReveal => {
-                if let Some(SuiteActivity::RunningCount(drill)) = self.suite.as_mut() {
-                    let final_shoe = drill.past_cut();
-                    let checkpoint = drill.finish_round(final_shoe);
-                    self.suite_message = Some(if checkpoint.final_count {
-                        format!(
-                            "Final count: {:+} · {} cards exposed · submit to finish",
-                            drill.running_count(),
-                            drill.exposed_cards()
-                        )
-                    } else {
-                        format!(
-                            "Running count: {:+} · {} cards exposed",
-                            drill.running_count(),
-                            drill.exposed_cards()
-                        )
-                    });
-                }
-            }
             Command::SuiteSubmit => {
                 let input = self.suite_input.parse::<i32>().ok();
                 let selected_action = self.suite_selected_action.take();
                 let mut pressure_count_finished = false;
                 let mut pressure_event_remains = false;
-                let mut running_count_finished = false;
+                let mut running_count_feedback = None;
                 let mut record = None;
                 if let Some(activity) = self.suite.as_mut() {
                     match activity {
                         SuiteActivity::RunningCount(drill) => {
-                            if let Some(submitted) = input {
-                                let correct = drill.submit_count(submitted);
-                                running_count_finished = drill.checkpoint.final_count;
-                                record = Some((GradeBucket::Count, correct));
-                                self.suite_message = Some(format!(
-                                    "{} · expected {:+}",
-                                    if correct { "Correct" } else { "Incorrect" },
-                                    drill.running_count()
-                                ));
+                            if let Some(submitted) = input
+                                && let Some(feedback) = drill.submit_count(submitted)
+                            {
+                                running_count_feedback = Some(feedback);
+                                record = Some((GradeBucket::Count, feedback.correct));
                             }
                         }
                         SuiteActivity::TrueCount(drill) => {
@@ -1044,15 +1069,27 @@ impl TrainerApp {
                 if let Some((bucket, correct)) = record {
                     self.suite_record(bucket, correct);
                 }
-                if running_count_finished {
-                    let passed = self.suite_attempts == self.suite_correct;
-                    self.suite_finish(ToolId::RunningCount, true, Some(passed));
-                    self.suite = None;
-                    self.suite_message = Some(if passed {
-                        "Running Count report: PASSED.".to_owned()
+                if let Some(feedback) = running_count_feedback {
+                    if feedback.final_count {
+                        let passed = self.suite_attempts == self.suite_correct;
+                        self.suite_finish(ToolId::RunningCount, true, Some(passed));
+                        self.suite = None;
+                        self.suite_running_next_step_at = None;
+                        self.suite_message = Some(if passed {
+                            "Running Count report: PASSED.".to_owned()
+                        } else {
+                            format!(
+                                "Running Count report: NOT PASSED · actual {:+}.",
+                                feedback.expected
+                            )
+                        });
                     } else {
-                        "Running Count report: NOT PASSED.".to_owned()
-                    });
+                        self.suite_running_next_step_at =
+                            Some(Instant::now() + self.running_count_step_delay());
+                        self.suite_message = (!feedback.correct).then(|| {
+                            format!("Wrong · actual running count: {:+}", feedback.expected)
+                        });
+                    }
                 }
                 if (pressure_count_finished || pressure_event_remains)
                     && self.suite_pressure_prompt.is_none()
@@ -1060,6 +1097,12 @@ impl TrainerApp {
                     self.begin_pressure_prompt();
                 }
                 self.suite_input.clear();
+            }
+            Command::SuiteRestart => {
+                if matches!(self.suite, Some(SuiteActivity::RunningCount(_))) {
+                    self.suite_finish(ToolId::RunningCount, false, None);
+                    self.start_suite(ToolId::RunningCount);
+                }
             }
             Command::SuiteEnd => {
                 let tool = match self.suite {
@@ -1078,6 +1121,7 @@ impl TrainerApp {
                 self.suite_finish(tool, false, None);
                 self.suite = None;
                 self.suite_pressure_decision_started_at = None;
+                self.suite_running_next_step_at = None;
                 self.suite_message = Some("Session ended early. No pass is recorded.".to_owned());
             }
             Command::SuiteCompleteShoe => {
@@ -1118,6 +1162,19 @@ impl TrainerApp {
                 return None;
             }
             if self.page == Page::TrainingSuite {
+                if let Some(SuiteActivity::RunningCount(drill)) = self.suite.as_ref() {
+                    if input.key_pressed(egui::Key::M) {
+                        return Some(Command::SuiteEnd);
+                    }
+                    if drill.checkpoint.prompt {
+                        if input.key_pressed(egui::Key::ArrowLeft) {
+                            return Some(Command::SuiteAdjustInput(-1));
+                        }
+                        if input.key_pressed(egui::Key::ArrowRight) {
+                            return Some(Command::SuiteAdjustInput(1));
+                        }
+                    }
+                }
                 if input.key_pressed(egui::Key::Enter) {
                     return Some(Command::SuiteSubmit);
                 }
@@ -1188,6 +1245,7 @@ impl TrainerApp {
 impl eframe::App for TrainerApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
+        self.tick_running_count(Instant::now());
         ctx.request_repaint_after(
             if (self.page == Page::Counting && self.counting_started_at.is_some())
                 || (self.page == Page::TrainingSuite && self.suite_started_at.is_some())

@@ -17,11 +17,11 @@ Observed 2026-10-14 from the authenticated Training Drills page:
 
 ## Native implementation mapping
 
-- Reuse the repository's bundled card SVGs and existing felt/table primitives. Added suite-specific card rows and discard trays are local UI only.
-- Running Count now exposes visible, last-round, hole-state, and discard cards; the renderer can show the actual round before and after the hole checkpoint.
+- Reuse the repository's bundled card SVGs and existing felt/table primitives. Added suite-specific card rows are local UI only.
+- Running Count now renders automatic local table states, keeps the dealer hole hidden until the simulated dealer turn, and opens an exact count prompt; it does not expose the True Count discard-tray UI.
 - True Count now renders its actual card prefix in a local discard tray and supports three real tray angles through the domain model.
 - Strategy drills render representative local cards from their domain situations, while the action controls remain native egui buttons.
-- The active header supplies elapsed/remaining time, graded progress, and a progress bar. Suite settings expose checkpoint frequency, deck/divisor choices, and True Count duration.
+- The active header supplies elapsed/remaining time, graded progress, and a progress bar. Running Count preferences persist the interval and reference delay-based speed scale; other suite settings remain grouped in the native menu.
 - Pressure Table owns ghost-seat state, deterministic action context, payout mismatch state, and a real per-decision time limit. The renderer shows those events as cards/panels.
 - Training Suite menu and stats now show current/lifetime accuracy, attempts, elapsed time, and streak counters.
 

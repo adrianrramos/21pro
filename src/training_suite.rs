@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::{
     counting::{quarter_deck_alternate, running_count, true_count_divisor, truncated_true_count},
-    game::{Game, GameError, Phase},
+    game::{Game, GameError, HandStatus, Phase},
     model::{Action, Card, HandKind, Rank, Situation, Suit},
     strategy::{self, IndexPlay, StrategySource},
 };
@@ -190,8 +190,34 @@ pub struct ToolSettings {
     pub half_deck: bool,
     /// Running-count checkpoint interval; `None` means the end-of-shoe prompt.
     pub count_every: Option<usize>,
+    /// Base delay between automatic Running Count table states in milliseconds.
+    ///
+    /// The stored values are `0..=2000` in 200 ms steps. The displayed speed
+    /// label runs in the opposite direction: 800 ms is speed 6.
+    pub dealing_delay_ms: u16,
     /// True Count session timeout in seconds.
     pub true_count_duration_secs: u64,
+}
+
+pub const DEALING_DELAY_STEP_MS: u16 = 200;
+pub const MAX_DEALING_DELAY_MS: u16 = 2_000;
+
+pub const fn dealing_speed_label(delay_ms: u16) -> u8 {
+    let bounded = if delay_ms > MAX_DEALING_DELAY_MS {
+        MAX_DEALING_DELAY_MS
+    } else {
+        delay_ms
+    };
+    let steps = bounded / DEALING_DELAY_STEP_MS;
+    10 - steps as u8
+}
+
+pub const fn dealing_delay_for_speed(speed: u8) -> Option<u16> {
+    if speed <= 10 {
+        Some((10 - speed) as u16 * DEALING_DELAY_STEP_MS)
+    } else {
+        None
+    }
 }
 
 impl Default for ToolSettings {
@@ -200,9 +226,24 @@ impl Default for ToolSettings {
             true_count_decks: 2,
             half_deck: false,
             count_every: Some(1),
+            dealing_delay_ms: 800,
             true_count_duration_secs: 90,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunningCountAdvance {
+    ShowingCards,
+    CountPrompt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunningCountFeedback {
+    pub submitted: i32,
+    pub expected: i32,
+    pub correct: bool,
+    pub final_count: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -449,14 +490,13 @@ pub fn count_checkpoint(
     }
 }
 
+/// A non-interactive table drill: the local basic-strategy player and dealer
+/// advance automatically while the learner watches the exposed cards.
 pub struct RunningCountDrill {
-    shoe: Vec<Card>,
-    cursor: usize,
-    discard: Vec<Card>,
-    exposed: Vec<Card>,
-    hole: Option<Card>,
-    last_round: [Card; 4],
-    last_round_len: usize,
+    game: Game,
+    frames: Vec<Game>,
+    frame_index: usize,
+    round_complete: bool,
     pub rounds: usize,
     pub checkpoint: CountCheckpoint,
     pub interval: Option<usize>,
@@ -464,19 +504,11 @@ pub struct RunningCountDrill {
 
 impl RunningCountDrill {
     pub fn new(seed: u64, interval: Option<usize>) -> Self {
-        let mut shoe = standard_shoe(6);
-        shoe.shuffle(&mut SmallRng::seed_from_u64(seed));
         Self {
-            shoe,
-            cursor: 0,
-            discard: Vec::new(),
-            exposed: Vec::new(),
-            hole: None,
-            last_round: [Card {
-                rank: Rank::Ace,
-                suit: Suit::Spades,
-            }; 4],
-            last_round_len: 0,
+            game: Game::new(seed),
+            frames: Vec::new(),
+            frame_index: 0,
+            round_complete: false,
             rounds: 0,
             checkpoint: CountCheckpoint {
                 prompt: false,
@@ -487,84 +519,185 @@ impl RunningCountDrill {
     }
 
     pub fn start_round(&mut self) -> Result<(), GameError> {
-        if self.shoe.len().saturating_sub(self.cursor) < 4 {
-            return Err(GameError::ShoeExhausted);
+        if self.checkpoint.prompt || self.checkpoint.final_count || !self.round_complete {
+            if self.frames.is_empty() {
+                // A fresh drill has no round to continue.
+            } else {
+                return Err(GameError::RoundInProgress);
+            }
         }
-        self.exposed.clear();
-        self.hole = None;
-        for _ in 0..3 {
-            let card = self.draw().ok_or(GameError::ShoeExhausted)?;
-            self.exposed.push(card);
-        }
-        self.hole = Some(self.draw().ok_or(GameError::ShoeExhausted)?);
+        self.game.deal()?;
+        let (game, frames) = build_running_count_round(self.game.clone())?;
+        self.game = game;
+        self.frames = frames;
+        self.frame_index = 0;
+        self.round_complete = false;
+        self.checkpoint = CountCheckpoint {
+            prompt: false,
+            final_count: false,
+        };
         Ok(())
     }
+
+    pub fn advance(&mut self) -> Result<RunningCountAdvance, GameError> {
+        if self.checkpoint.prompt {
+            return Ok(RunningCountAdvance::CountPrompt);
+        }
+        if self.frames.is_empty() {
+            return Err(GameError::InvalidState(
+                "no Running Count round has started",
+            ));
+        }
+        if self.round_complete {
+            self.start_round()?;
+            return Ok(RunningCountAdvance::ShowingCards);
+        }
+        if self.frame_index + 1 < self.frames.len() {
+            self.frame_index += 1;
+        }
+        if self.frame_index + 1 == self.frames.len() {
+            self.complete_round();
+            if self.checkpoint.prompt {
+                return Ok(RunningCountAdvance::CountPrompt);
+            }
+        }
+        Ok(RunningCountAdvance::ShowingCards)
+    }
+
+    pub fn current_game(&self) -> &Game {
+        self.frames.get(self.frame_index).unwrap_or(&self.game)
+    }
+
     pub fn running_count(&self) -> i32 {
-        running_count(&self.discard) + running_count(&self.exposed)
-    }
-
-    pub fn hidden_hole_count(&self) -> i32 {
-        self.running_count()
-    }
-
-    /// Cards currently visible on the felt before the hole is revealed.
-    pub fn visible_cards(&self) -> &[Card] {
-        &self.exposed
-    }
-
-    /// Cards from the most recently completed round, including the revealed hole.
-    pub fn last_round_cards(&self) -> &[Card] {
-        &self.last_round[..self.last_round_len]
+        self.current_game().running_count()
     }
 
     pub fn hole_hidden(&self) -> bool {
-        self.hole.is_some()
+        let game = self.current_game();
+        game.phase != Phase::Finished && game.dealer.len() > 1
     }
 
-    pub fn discard_cards(&self) -> &[Card] {
-        &self.discard
-    }
-
-    pub fn reveal_hole(&mut self) -> Option<Card> {
-        let hole = self.hole.take()?;
-        self.exposed.push(hole);
-        Some(hole)
-    }
-
-    pub fn finish_round(&mut self, final_shoe: bool) -> CountCheckpoint {
-        self.reveal_hole();
-        self.last_round_len = self.exposed.len().min(self.last_round.len());
-        self.last_round[..self.last_round_len]
-            .copy_from_slice(&self.exposed[..self.last_round_len]);
-        self.discard.append(&mut self.exposed);
-        let checkpoint = count_checkpoint(self.rounds, self.interval, self.past_cut(), final_shoe);
-        self.rounds += 1;
-        self.checkpoint = checkpoint;
-        checkpoint
-    }
-
-    pub fn submit_count(&mut self, submitted: i32) -> bool {
-        if !self.checkpoint.prompt {
-            return false;
-        }
-        let correct = submitted == self.running_count();
-        self.checkpoint.prompt = false;
-        correct
-    }
     pub fn exposed_cards(&self) -> usize {
-        self.discard.len() + self.exposed.len() + usize::from(self.hole.is_some())
+        let game = self.current_game();
+        let visible_dealer = if self.hole_hidden() {
+            game.dealer.len().saturating_sub(1)
+        } else {
+            game.dealer.len()
+        };
+        let player_cards = game
+            .hands
+            .iter()
+            .map(|hand| hand.cards.len())
+            .sum::<usize>();
+        if game.phase == Phase::Finished {
+            game.discarded_count()
+        } else {
+            game.discarded_count() + visible_dealer + player_cards
+        }
     }
 
     pub fn past_cut(&self) -> bool {
-        let remaining = 6 * 52usize - self.discard.len();
-        remaining < 52
+        self.game.past_cut()
     }
 
-    fn draw(&mut self) -> Option<Card> {
-        let card = self.shoe.get(self.cursor).copied()?;
-        self.cursor += 1;
-        Some(card)
+    pub fn submit_count(&mut self, submitted: i32) -> Option<RunningCountFeedback> {
+        if !self.checkpoint.prompt {
+            return None;
+        }
+        let expected = self.running_count();
+        let feedback = RunningCountFeedback {
+            submitted,
+            expected,
+            correct: submitted == expected,
+            final_count: self.checkpoint.final_count,
+        };
+        self.checkpoint.prompt = false;
+        Some(feedback)
     }
+
+    fn complete_round(&mut self) {
+        let past_cut = self.game.past_cut();
+        self.checkpoint = count_checkpoint(self.rounds, self.interval, past_cut, past_cut);
+        self.rounds += 1;
+        self.round_complete = true;
+    }
+}
+
+fn build_running_count_round(mut game: Game) -> Result<(Game, Vec<Game>), GameError> {
+    let mut frames = initial_running_count_frames(&game);
+    for _ in 0..64 {
+        let Some(situation) = game.situation() else {
+            break;
+        };
+        game.act(strategy::recommendation(situation).action)?;
+        append_running_count_transition(&mut frames, &game);
+    }
+    if game.phase != Phase::Finished {
+        return Err(GameError::InvalidState(
+            "automatic Running Count play did not settle",
+        ));
+    }
+    if frames
+        .last()
+        .is_none_or(|frame| frame.phase != Phase::Finished)
+    {
+        frames.push(game.clone());
+    }
+    Ok((game, frames))
+}
+
+fn initial_running_count_frames(game: &Game) -> Vec<Game> {
+    let Some(hand) = game.hands.first() else {
+        return vec![game.clone()];
+    };
+    if game.dealer.len() < 2 || hand.cards.len() < 2 {
+        return vec![game.clone()];
+    }
+    let mut first = game.clone();
+    first.dealer.truncate(1);
+    first.hands[0].cards.truncate(1);
+    first.hands[0].status = HandStatus::Playing;
+    first.phase = if game.phase == Phase::Insurance {
+        Phase::Insurance
+    } else {
+        Phase::Playing
+    };
+    first.result = None;
+
+    let mut second = first.clone();
+    second.hands[0].cards = hand.cards.clone();
+
+    let mut hole_hidden = game.clone();
+    hole_hidden.result = None;
+    if game.phase == Phase::Finished {
+        hole_hidden.phase = Phase::Playing;
+        hole_hidden.hands[0].status = HandStatus::Playing;
+    }
+    vec![first, second, hole_hidden]
+}
+
+fn append_running_count_transition(frames: &mut Vec<Game>, after: &Game) {
+    if after.phase != Phase::Finished {
+        frames.push(after.clone());
+        return;
+    }
+    let dealer_blackjack = after
+        .result
+        .as_ref()
+        .is_some_and(|result| result.dealer_blackjack);
+    if !dealer_blackjack && after.dealer.len() >= 2 {
+        let mut hole_hidden = after.clone();
+        hole_hidden.dealer.truncate(2);
+        hole_hidden.phase = Phase::Playing;
+        hole_hidden.result = None;
+        frames.push(hole_hidden.clone());
+        for dealer_len in 3..after.dealer.len() {
+            let mut dealer_hit = hole_hidden.clone();
+            dealer_hit.dealer = after.dealer[..dealer_len].to_vec();
+            frames.push(dealer_hit);
+        }
+    }
+    frames.push(after.clone());
 }
 
 /// Invalid configuration supplied to the True Count drill constructor.
@@ -1096,15 +1229,93 @@ mod tests {
     use super::*;
 
     #[test]
-    fn running_count_excludes_hole_until_reveal() {
+    fn running_count_automatically_plays_the_round_before_prompting() {
         let mut drill = RunningCountDrill::new(7, Some(1));
         drill.start_round().unwrap();
-        let before = drill.hidden_hole_count();
-        let hole = drill.reveal_hole().expect("a four-card round has a hole");
-        assert_eq!(
-            drill.running_count() - before,
-            i32::from(crate::counting::card_value(hole.rank))
+
+        let mut steps = 0;
+        while !drill.checkpoint.prompt {
+            assert!(matches!(
+                drill.advance().unwrap(),
+                RunningCountAdvance::ShowingCards | RunningCountAdvance::CountPrompt
+            ));
+            steps += 1;
+            assert!(steps < 100, "automatic round did not settle");
+        }
+
+        let game = drill.current_game();
+        assert_eq!(game.phase, Phase::Finished);
+        assert!(game.result.is_some());
+        assert!(game.dealer.len() >= 2);
+        assert!(
+            game.hands
+                .iter()
+                .all(|hand| matches!(hand.status, crate::game::HandStatus::Settled))
         );
+        assert!(steps > 1, "the drill should show multiple automatic states");
+        assert_eq!(drill.rounds, 1);
+        assert!(!drill.hole_hidden());
+    }
+    #[test]
+    fn running_count_frames_include_automatic_player_and_dealer_cards() {
+        for seed in 0..128 {
+            let mut drill = RunningCountDrill::new(seed, Some(1));
+            drill.start_round().unwrap();
+            let mut saw_player_hit = false;
+            let mut saw_dealer_hit = false;
+            for _ in 0..100 {
+                let game = drill.current_game();
+                if game.phase == Phase::Playing {
+                    saw_player_hit |= game.hands.iter().any(|hand| hand.cards.len() > 2);
+                    saw_dealer_hit |= game.dealer.len() > 2;
+                }
+                if drill.checkpoint.prompt {
+                    break;
+                }
+                drill.advance().unwrap();
+            }
+            if saw_player_hit && saw_dealer_hit {
+                return;
+            }
+        }
+        panic!("seed sweep did not observe both automatic player and dealer hits");
+    }
+
+    #[test]
+    fn running_count_feedback_reports_an_incorrect_answer() {
+        let mut drill = RunningCountDrill::new(7, Some(1));
+        drill.start_round().unwrap();
+        while !drill.checkpoint.prompt {
+            drill.advance().unwrap();
+        }
+
+        let expected = drill.running_count();
+        let feedback = drill.submit_count(expected + 1).unwrap();
+        assert_eq!(feedback.expected, expected);
+        assert_eq!(feedback.submitted, expected + 1);
+        assert!(!feedback.correct);
+        assert!(!drill.checkpoint.prompt);
+    }
+
+    #[test]
+    fn running_count_speed_labels_use_the_reference_delay_scale() {
+        assert_eq!(ToolSettings::default().dealing_delay_ms, 800);
+        assert_eq!(dealing_speed_label(800), 6);
+        assert_eq!(dealing_delay_for_speed(6), Some(800));
+        assert_eq!(dealing_speed_label(0), 10);
+        assert_eq!(dealing_speed_label(2_000), 0);
+        assert_eq!(dealing_delay_for_speed(11), None);
+    }
+
+    #[test]
+    fn running_count_can_skip_non_checkpoint_rounds() {
+        let mut drill = RunningCountDrill::new(7, Some(3));
+        drill.start_round().unwrap();
+        while !drill.checkpoint.prompt && drill.rounds < 1 {
+            drill.advance().unwrap();
+        }
+        assert_eq!(drill.rounds, 1);
+        assert!(!drill.checkpoint.prompt);
     }
 
     #[test]
@@ -1249,16 +1460,6 @@ mod tests {
             }
         }
         assert!(found);
-    }
-
-    #[test]
-    fn running_count_checkpoint_is_consumed_after_submission() {
-        let mut drill = RunningCountDrill::new(7, Some(1));
-        drill.start_round().unwrap();
-        let checkpoint = drill.finish_round(false);
-        assert!(checkpoint.prompt);
-        assert!(drill.submit_count(drill.running_count()));
-        assert!(!drill.checkpoint.prompt);
     }
 
     fn complete_assessment_shoe(session: &mut AssessmentSession) {

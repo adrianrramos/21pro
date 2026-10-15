@@ -8,7 +8,9 @@ use twenty_one_pro::{
     model::{ASSESSMENT_ROUNDS, Action, HandKind},
     strategy,
     training::StudyMode,
-    training_suite::{GradeBucket, ToolId, representative_cards},
+    training_suite::{
+        GradeBucket, ToolId, ToolSettings, dealing_speed_label, representative_cards,
+    },
 };
 
 fn format_duration(duration: Duration) -> String {
@@ -47,6 +49,44 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let month = month_part + if month_part < 10 { 3 } else { -9 };
     let year = year + i64::from(month <= 2);
     (year, month as u32, day as u32)
+}
+fn running_count_settings(
+    ui: &mut egui::Ui,
+    settings: &ToolSettings,
+    command: &mut Option<Command>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Ask for count every:");
+        for (interval, label) in [
+            (None, "End of shoe"),
+            (Some(1), "1 round"),
+            (Some(3), "3 rounds"),
+            (Some(5), "5 rounds"),
+            (Some(10), "10 rounds"),
+            (Some(25), "25 rounds"),
+        ] {
+            if ui
+                .selectable_label(settings.count_every == interval, label)
+                .clicked()
+            {
+                *command = Some(Command::SuiteSetCountEvery(interval));
+            }
+        }
+    });
+    let mut speed = dealing_speed_label(settings.dealing_delay_ms);
+    ui.horizontal(|ui| {
+        ui.label(format!("Dealing speed: {speed}"));
+        if ui
+            .add(
+                egui::Slider::new(&mut speed, 0..=10)
+                    .show_value(false)
+                    .text(""),
+            )
+            .changed()
+        {
+            *command = Some(Command::SuiteSetDealingSpeed(speed));
+        }
+    });
 }
 
 impl TrainerApp {
@@ -744,7 +784,7 @@ impl TrainerApp {
                 ui.add_space(12.0);
             }
             w::panel().show(ui, |ui| {
-                ui.label(RichText::new("True Count settings").size(18.0).strong());
+                ui.label(RichText::new("Training Suite settings").size(18.0).strong());
                 w::muted(
                     ui,
                     "These settings are suite-local and do not change The table's six-deck rules.",
@@ -791,27 +831,7 @@ impl TrainerApp {
                         }
                     }
                 });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Count checkpoint:");
-                    for (interval, label) in [
-                        (None, "End of shoe"),
-                        (Some(1), "Every 1"),
-                        (Some(3), "Every 3"),
-                        (Some(5), "Every 5"),
-                        (Some(10), "Every 10"),
-                        (Some(25), "Every 25"),
-                    ] {
-                        if ui
-                            .selectable_label(
-                                self.profile.suite_settings.count_every == interval,
-                                label,
-                            )
-                            .clicked()
-                        {
-                            *command = Some(Command::SuiteSetCountEvery(interval));
-                        }
-                    }
-                });
+                running_count_settings(ui, &self.profile.suite_settings, command);
             });
             ui.add_space(12.0);
             for tool in ToolId::ALL {
@@ -822,7 +842,7 @@ impl TrainerApp {
                             w::muted(
                                 ui,
                                 match tool {
-                                    ToolId::RunningCount => "Exact Hi-Lo count with a hidden-hole checkpoint.",
+                                    ToolId::RunningCount => "Watch automatic basic-strategy rounds, then answer the exact Hi-Lo count.",
                                     ToolId::TrueCount => "Estimate truncated true count from a discard tray.",
                                     ToolId::BasicStrategy => "One-decision situations from the local chart.",
                                     ToolId::CoreIndexPlays => "Threshold and comparator practice for local indexes.",
@@ -967,75 +987,85 @@ impl TrainerApp {
             });
             ui.add_space(8.0);
         }
+        let suite_settings = self.profile.suite_settings.clone();
         match self.suite.as_mut() {
             Some(SuiteActivity::RunningCount(drill)) => {
                 w::heading(
                     ui,
                     "Running Count",
-                    "Follow the table, keep the hole card hidden, then submit the checkpoint.",
+                    "Watch the automatic round, then enter the exact Hi-Lo count.",
                 );
-                let displayed = if drill.visible_cards().is_empty() {
-                    drill.last_round_cards()
-                } else {
-                    drill.visible_cards()
-                };
-                let dealer = displayed.get(..1).unwrap_or(&[]);
-                let player = displayed.get(1..).unwrap_or(&[]);
-                let hide_hole = !drill.visible_cards().is_empty() && drill.hole_hidden();
-                ui.columns(2, |columns| {
-                    w::suite_table(
-                        &mut columns[0],
-                        dealer,
-                        player,
-                        hide_hole,
-                        "Count every exposed card · [Enter] submits",
-                    );
-                    w::discard_tray(
-                        &mut columns[1],
-                        drill.discard_cards(),
-                        (drill.rounds % 3) as u8,
-                    );
-                    w::panel().inner_margin(12).show(&mut columns[1], |ui| {
-                        w::eyebrow(ui, "COUNT STATE");
-                        ui.label(
-                            RichText::new(format!("{:+}", drill.running_count()))
-                                .size(28.0)
-                                .strong(),
-                        );
-                        w::muted(
-                            ui,
-                            format!(
-                                "Round {} · {} cards exposed · {}",
-                                drill.rounds + 1,
-                                drill.exposed_cards(),
-                                if drill.checkpoint.final_count {
-                                    "final checkpoint"
-                                } else if drill.checkpoint.prompt {
-                                    "checkpoint ready"
-                                } else {
-                                    "watch the felt"
+                let game = drill.current_game();
+                ui.columns(3, |columns| {
+                    w::game_table(&mut columns[0], game);
+                    w::panel().inner_margin(16).show(&mut columns[1], |ui| {
+                        if drill.checkpoint.prompt {
+                            ui.vertical_centered(|ui| {
+                                w::eyebrow(ui, "RUNNING COUNT");
+                                ui.add_space(12.0);
+                                ui.horizontal(|ui| {
+                                    if ui.button("‹").clicked() {
+                                        *command = Some(Command::SuiteAdjustInput(-1));
+                                    }
+                                    ui.add_sized(
+                                        [120.0, 48.0],
+                                        egui::TextEdit::singleline(&mut self.suite_input)
+                                            .horizontal_align(egui::Align::Center),
+                                    );
+                                    if ui.button("›").clicked() {
+                                        *command = Some(Command::SuiteAdjustInput(1));
+                                    }
+                                });
+                                ui.add_space(12.0);
+                                if w::primary(ui, "Submit  [Enter]").clicked() {
+                                    *command = Some(Command::SuiteSubmit);
                                 }
-                            ),
-                        );
+                            });
+                        } else {
+                            w::eyebrow(ui, "AUTOMATIC DEAL");
+                            ui.label(
+                                RichText::new("Watch the hand play out.")
+                                    .size(20.0)
+                                    .strong(),
+                            );
+                            w::muted(
+                                ui,
+                                "The player follows basic strategy automatically; the dealer reveals the hole and hits through the local H17 rules.",
+                            );
+                        }
+                    });
+                    w::panel().inner_margin(14).show(&mut columns[2], |ui| {
+                        w::eyebrow(ui, "PREFERENCES");
+                        running_count_settings(ui, &suite_settings, command);
+                        ui.separator();
+                        w::eyebrow(ui, "KEYBOARD SHORTCUTS");
+                        w::muted(ui, "← / →  adjust count");
+                        w::muted(ui, "Enter  submit count");
+                        w::muted(ui, "M  return to menu");
+                        ui.separator();
+                        w::eyebrow(ui, "PROGRESS");
+                        let elapsed = self
+                            .suite_started_at
+                            .map_or(self.suite_elapsed, |started| started.elapsed());
+                        let penetration = (drill.exposed_cards() / 52).min(6);
+                        let accuracy = if self.suite_attempts == 0 {
+                            100.0
+                        } else {
+                            self.suite_correct as f32 / self.suite_attempts as f32 * 100.0
+                        };
+                        ui.label(format!("Timer  {}", format_duration(elapsed)));
+                        ui.label(format!("Penetration  {penetration}/6D"));
+                        ui.label(format!("Rounds  {}", drill.rounds));
+                        ui.label(format!(
+                            "Count  {} / {}  ·  {accuracy:.0}%",
+                            self.suite_correct, self.suite_attempts
+                        ));
+                        ui.add_space(10.0);
+                        if ui.button("Restart drill").clicked() {
+                            *command = Some(Command::SuiteRestart);
+                        }
                     });
                 });
-                if drill.checkpoint.prompt {
-                    ui.label(RichText::new("Enter the exact running count.").strong());
-                    ui.text_edit_singleline(&mut self.suite_input);
-                    if w::primary(ui, "Submit count  [Enter]").clicked() {
-                        *command = Some(Command::SuiteSubmit);
-                    }
-                    if !drill.checkpoint.final_count && ui.button("Next round").clicked() {
-                        *command = Some(Command::SuiteNext);
-                    }
-                } else if drill.rounds > 0 {
-                    if w::primary(ui, "Next round").clicked() {
-                        *command = Some(Command::SuiteNext);
-                    }
-                    w::muted(ui, "This round did not require a count checkpoint.");
-                } else if w::primary(ui, "Reveal hole and finish round").clicked() {
-                    *command = Some(Command::SuiteReveal);
-                }
             }
             Some(SuiteActivity::TrueCount(drill)) => {
                 w::heading(

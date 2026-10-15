@@ -144,6 +144,9 @@ A project-owned count-based action rule with an explicit hand class, dealer upca
 **Training stats**:
 Suite-only accuracy, streak, elapsed-time, and mistake-bucket counters persisted in the local player profile.
 
+**Running-count check**:
+An automatic basic-strategy table round followed by an exact Hi-Lo count prompt. The learner never chooses table actions; only count submissions are graded.
+
 **Discard tray**:
 The local visible-card collection used by the True Count drill. Its angle changes which portion of the exposed cards is presented; it does not change the underlying count.
 
@@ -161,8 +164,6 @@ The visibility of the app's calculated hand total during practice. A planned set
 **Practice focus — Proposed name; planned capability**:
 A learner-selected restriction on the kinds of exercises generated, such as soft hands, splitting situations, or doubling opportunities. This broader filtering capability is distinct from the existing drill for one exact situation.
 
-**Running-count check**:
-A periodic in-play prompt asking the learner to report the cumulative count of exposed cards. It is separate from the 52-card Card-count trainer and records only suite counting accuracy.
 
 **Bankroll simulation — Planned**:
 A planning tool using inputs such as intended playing time, starting bankroll, and bet size to estimate expected value and variance. Its estimates would describe possible financial behavior, not predict or guarantee a particular casino result.
