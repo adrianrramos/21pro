@@ -76,6 +76,10 @@ pub enum GameError {
     InvalidPractice(&'static str),
     #[error("Invalid saved game: {0}")]
     InvalidSnapshot(String),
+    #[error("The shoe has no cards available for this action.")]
+    ShoeExhausted,
+    #[error("The game state is missing cards required for this action.")]
+    InvalidState(&'static str),
 }
 
 /// Serializable game state for durable Free Play resume.
@@ -220,12 +224,10 @@ impl Game {
         self.shoe.shuffle(&mut self.rng);
     }
 
-    fn draw(&mut self) -> Card {
-        // A round starts above the cut card; with one seat and at most four
-        // hands, the six-deck rank inventory cannot exhaust that reserve.
-        self.shoe
-            .pop()
-            .expect("six-deck cut-card reserve exhausted")
+    fn draw(&mut self) -> Result<Card, GameError> {
+        // A round starts above the cut card; callers still receive an error if
+        // a malformed state or future rule change exhausts the shoe.
+        self.shoe.pop().ok_or(GameError::ShoeExhausted)
     }
 
     /// Returns the number of undealt cards in the current shoe.
@@ -260,10 +262,10 @@ impl Game {
         self.active = 0;
         self.splits_used = 0;
         self.insured = false;
-        let first = self.draw();
-        let upcard = self.draw();
-        let second = self.draw();
-        let hole = self.draw();
+        let first = self.draw()?;
+        let upcard = self.draw()?;
+        let second = self.draw()?;
+        let hole = self.draw()?;
         self.hands
             .push(PlayerHand::new(vec![first, second], false, false));
         self.dealer.extend([upcard, hole]);
@@ -273,7 +275,7 @@ impl Game {
             Phase::Playing
         };
         if self.phase == Phase::Playing {
-            self.advance();
+            self.advance()?;
         }
         Ok(())
     }
@@ -312,7 +314,7 @@ impl Game {
             } else {
                 value.total
             },
-            dealer: self.dealer[0].rank.value(),
+            dealer: self.dealer.first()?.rank.value(),
             can_double: hand.cards.len() == 2 && !hand.split_aces,
             can_split: pair && self.splits_used < 3,
             can_surrender: hand.cards.len() == 2 && !hand.from_split,
@@ -321,6 +323,9 @@ impl Game {
     }
 
     pub fn act(&mut self, action: Action) -> Result<(), GameError> {
+        if self.phase == Phase::Playing && self.dealer.first().is_none() {
+            return Err(GameError::InvalidState("the dealer upcard is missing"));
+        }
         let situation = self.situation().ok_or(GameError::NoActiveDecision)?;
         // Check before any draw, RNG advance, bet change, or other mutation.
         if !situation.allows(action) {
@@ -332,19 +337,19 @@ impl Game {
                 self.phase = Phase::Playing;
                 if self.dealer_has_blackjack() {
                     self.active = self.hands.len();
-                    self.settle();
+                    self.settle()?;
                 } else {
-                    self.advance();
+                    self.advance()?;
                 }
                 return Ok(());
             }
             Action::Hit => {
-                let card = self.draw();
+                let card = self.draw()?;
                 self.hands[self.active].cards.push(card);
             }
             Action::Stand => self.hands[self.active].status = HandStatus::Stood,
             Action::Double => {
-                let card = self.draw();
+                let card = self.draw()?;
                 let hand = &mut self.hands[self.active];
                 hand.wager_half_units *= 2;
                 hand.cards.push(card);
@@ -356,10 +361,13 @@ impl Game {
             }
             Action::Surrender => self.hands[self.active].status = HandStatus::Surrendered,
             Action::Split => {
-                let first_draw = self.draw();
-                let second_draw = self.draw();
+                let first_draw = self.draw()?;
+                let second_draw = self.draw()?;
                 let hand = &mut self.hands[self.active];
-                let second = hand.cards.pop().expect("split requires a pair");
+                let second = hand
+                    .cards
+                    .pop()
+                    .ok_or(GameError::InvalidState("split hand has no pair"))?;
                 let aces = second.rank == Rank::Ace;
                 hand.cards.push(first_draw);
                 hand.from_split = true;
@@ -371,11 +379,11 @@ impl Game {
                 self.splits_used += 1;
             }
         }
-        self.advance();
+        self.advance()?;
         Ok(())
     }
 
-    fn advance(&mut self) {
+    fn advance(&mut self) -> Result<(), GameError> {
         while self.active < self.hands.len() {
             let hand = &mut self.hands[self.active];
             if hand.status == HandStatus::Playing {
@@ -387,18 +395,18 @@ impl Game {
                 }
             }
             if hand.status == HandStatus::Playing {
-                return;
+                return Ok(());
             }
             self.active += 1;
         }
-        self.settle();
+        self.settle()
     }
 
     fn dealer_has_blackjack(&self) -> bool {
         self.dealer.len() == 2 && hand_value(&self.dealer).total == 21
     }
 
-    fn settle(&mut self) {
+    fn settle(&mut self) -> Result<(), GameError> {
         let dealer_blackjack = self.dealer_has_blackjack();
         // No need to draw against only busts, surrenders, or a natural.
         if !dealer_blackjack
@@ -412,7 +420,7 @@ impl Game {
                 if value.total > 17 || (value.total == 17 && !value.soft) {
                     break;
                 }
-                let card = self.draw();
+                let card = self.draw()?;
                 self.dealer.push(card);
             }
         }
@@ -462,6 +470,7 @@ impl Game {
             dealer_blackjack,
         });
         self.phase = Phase::Finished;
+        Ok(())
     }
 
     /// Construct a real target from a freshly shuffled six-deck shoe. Forced
@@ -470,70 +479,28 @@ impl Game {
     /// (as explained by Situation::context), not fictitious live sibling hands.
     pub fn practice(target: Situation, seed: u64) -> Result<Self, GameError> {
         let invalid = GameError::InvalidPractice;
-        if !(2..=11).contains(&target.dealer) {
-            return Err(invalid("dealer upcard must be 2 through ace"));
-        }
+        let values = validate_practice_target(target).map_err(invalid)?;
         let mut game = Self::new(seed);
         if target.kind == HandKind::Insurance {
-            let canonical = Situation {
-                kind: HandKind::Insurance,
-                value: 0,
-                dealer: 11,
-                can_double: false,
-                can_split: false,
-                can_surrender: false,
-                split_aces: false,
-            };
-            if target != canonical {
-                return Err(invalid(
-                    "insurance uses value 0, dealer ace, and no hand-action flags",
-                ));
-            }
             let up = game.take_value(11)?;
-            let first = game.draw();
-            let second = game.draw();
-            let hole = game.draw();
+            let first = game.draw()?;
+            let second = game.draw()?;
+            let hole = game.draw()?;
             game.dealer.extend([up, hole]);
             game.hands
                 .push(PlayerHand::new(vec![first, second], false, false));
             game.phase = Phase::Insurance;
             return Ok(game);
         }
-        if target.can_surrender && (!target.can_double || target.split_aces) {
-            return Err(invalid(
-                "surrender requires an original two-card hand with doubling available",
-            ));
-        }
-        if target.can_split && target.kind != HandKind::Pair {
-            return Err(invalid("only a two-card pair may split"));
-        }
-        if target.split_aces
-            && (target.kind != HandKind::Pair
-                || target.value != 11
-                || target.can_double
-                || target.can_surrender)
-        {
-            return Err(invalid(
-                "only a pair of split aces has an actionable one-card-only decision",
-            ));
-        }
-        if target.kind == HandKind::Pair && !target.can_double && !target.split_aces {
-            return Err(invalid("an ordinary two-card pair always permits doubling"));
-        }
-        if target.kind == HandKind::Pair && !target.can_split && target.can_surrender {
-            return Err(invalid(
-                "an original pair cannot already have exhausted split capacity",
-            ));
-        }
-        let (values, length) = practice_values(target).ok_or(invalid(
-            "no playable card composition has this total and action availability",
-        ))?;
+        let Some((values, length)) = values else {
+            return Err(invalid("insurance has no player hand values"));
+        };
         let mut cards = Vec::with_capacity(length);
         for &value in &values[..length] {
             cards.push(game.take_value(value)?);
         }
         let up = game.take_value(target.dealer)?;
-        let hole = game.draw();
+        let hole = game.draw()?;
         game.dealer.extend([up, hole]);
         let from_split = target.split_aces || (target.can_double && !target.can_surrender);
         game.splits_used = if target.kind == HandKind::Pair && !target.can_split {
@@ -740,6 +707,48 @@ fn validate_game_state(state: GameState<'_>) -> Result<(), GameError> {
         }
     }
     Ok(())
+}
+
+fn validate_practice_target(target: Situation) -> Result<Option<([u8; 3], usize)>, &'static str> {
+    if !(2..=11).contains(&target.dealer) {
+        return Err("dealer upcard must be 2 through ace");
+    }
+    if target.kind == HandKind::Insurance {
+        return (target.value == 0
+            && target.dealer == 11
+            && !target.can_double
+            && !target.can_split
+            && !target.can_surrender
+            && !target.split_aces)
+            .then_some(None)
+            .ok_or("insurance uses value 0, dealer ace, and no hand-action flags");
+    }
+    if target.can_surrender && (!target.can_double || target.split_aces) {
+        return Err("surrender requires an original two-card hand with doubling available");
+    }
+    if target.can_split && target.kind != HandKind::Pair {
+        return Err("only a two-card pair may split");
+    }
+    if target.split_aces
+        && (target.kind != HandKind::Pair
+            || target.value != 11
+            || target.can_double
+            || target.can_surrender)
+    {
+        return Err("only a pair of split aces has an actionable one-card-only decision");
+    }
+    if target.kind == HandKind::Pair && !target.can_double && !target.split_aces {
+        return Err("an ordinary two-card pair always permits doubling");
+    }
+    if target.kind == HandKind::Pair && !target.can_split && target.can_surrender {
+        return Err("an original pair cannot already have exhausted split capacity");
+    }
+    practice_values(target)
+        .map(Some)
+        .ok_or("no playable card composition has this total and action availability")
+}
+pub(crate) fn valid_practice_situation(target: Situation) -> bool {
+    validate_practice_target(target).is_ok()
 }
 
 #[cfg(test)]
@@ -1178,5 +1187,22 @@ mod tests {
             Game::from_snapshot(snapshot),
             Err(GameError::InvalidSnapshot(_))
         ));
+    }
+
+    #[test]
+    fn malformed_or_exhausted_state_returns_errors_instead_of_panicking() {
+        let mut missing_dealer = Game::new(1);
+        missing_dealer.deal().unwrap();
+        missing_dealer.dealer.clear();
+        assert_eq!(missing_dealer.situation(), None);
+        assert_eq!(
+            missing_dealer.act(Action::Hit),
+            Err(GameError::InvalidState("the dealer upcard is missing"))
+        );
+
+        let mut exhausted = Game::new(2);
+        exhausted.deal().unwrap();
+        exhausted.shoe.clear();
+        assert_eq!(exhausted.act(Action::Hit), Err(GameError::ShoeExhausted));
     }
 }

@@ -11,6 +11,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "21 Pro · Blackjack Strategy Trainer",
         options,
-        Box::new(|cc| Ok(Box::new(app::TrainerApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(app::TrainerApp::new(cc)?))),
     )
 }

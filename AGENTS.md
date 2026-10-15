@@ -40,3 +40,11 @@ Every visual change MUST include one committed semantic happy-path scenario and 
 - Keep save-failure and corrupt-database cases in Rust/storage tests, where failures are deterministic.
 - Run the UI scenario with an isolated profile and a unique inspection port.
 - Keep the inspection endpoint on loopback; it has no authentication.
+
+## Safety and failure handling
+
+- Obtain explicit human approval before adding or changing `unsafe` Rust; document the safety invariant beside each unsafe block.
+- Keep `unwrap` and `expect` only for invariants enforced locally by types or immediately preceding checks. State the invariant in a nearby comment when it is not obvious.
+- Handle every recoverable `Result` at its shared boundary: propagate with `?`, or present an actionable error without resetting or silently discarding user data.
+- Add focused edge-case tests for changed failure paths and assert observable errors or preserved state.
+- Obtain human approval before migrations, security-sensitive changes, or destructive operations such as deleting or rewriting user data.

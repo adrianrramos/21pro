@@ -566,7 +566,9 @@ pub fn trend(ui: &mut egui::Ui, analytics: &Analytics) {
     let denominator = (analytics.trend.len().saturating_sub(1)).max(1) as f32;
     let mut previous = None;
     for (index, point) in analytics.trend.iter().enumerate() {
-        let accuracy = point.accuracy().expect("nonempty trend block");
+        let Some(accuracy) = point.accuracy() else {
+            continue;
+        };
         let position = pos2(
             plot.left() + index as f32 / denominator * plot.width(),
             plot.bottom() - accuracy * plot.height(),

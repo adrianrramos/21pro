@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use super::{Command, Page, TrainerApp, now, widgets as w};
+use super::{Command, Page, TrainerApp, widgets as w};
 use eframe::egui::{self, Align2, FontId, RichText, Sense, Stroke, pos2, vec2};
 use twenty_one_pro::{
     counting::TRIAL_SIZE,
@@ -125,13 +125,9 @@ impl TrainerApp {
                         .color(w::MUTED),
                 );
                 ui.label(
-                    RichText::new(if self.dirty {
-                        "UNSAVED CHANGES"
-                    } else {
-                        "PROGRESS SAVED LOCALLY"
-                    })
-                    .size(10.0)
-                    .color(if self.dirty { w::GOLD } else { w::GREEN }),
+                    RichText::new(self.save_status())
+                        .size(10.0)
+                        .color(if self.dirty { w::GOLD } else { w::GREEN }),
                 );
             });
     }
@@ -243,7 +239,15 @@ impl TrainerApp {
                 ui.label(RichText::new("Baseline complete. Your personalized training is ready.").strong().color(w::GREEN));
                 w::muted(ui, "250 rounds is a starting sample, not proof of mastery. Rare hands may still be unseen.");
                 ui.horizontal_wrapped(|ui| {
-                    if w::primary(ui, "Start focused practice").clicked() { *command = Some(Command::StartPractice(self.profile.practice_queue(now(), 12))); }
+                    if w::primary(ui, "Start focused practice").clicked() {
+                        match self.now() {
+                            Ok(now) => {
+                                *command =
+                                    Some(Command::StartPractice(self.profile.practice_queue(now, 12)));
+                            }
+                            Err(error) => self.error = Some(error),
+                        }
+                    }
                     if ui.button("See my last hand").clicked() { self.page = Page::Table; }
                     if ui.small_button("Dismiss").clicked() { self.just_unlocked = false; }
                 });
@@ -362,11 +366,18 @@ impl TrainerApp {
                         "{} / {} missed",
                         skill.stats.mistakes, skill.stats.attempts
                     ));
-                    ui.label(
-                        RichText::new(w::due_label(skill.due_at, now()))
-                            .size(12.0)
-                            .color(w::MUTED),
-                    );
+                    match self.now() {
+                        Ok(now) => {
+                            ui.label(
+                                RichText::new(w::due_label(skill.due_at, now))
+                                    .size(12.0)
+                                    .color(w::MUTED),
+                            );
+                        }
+                        Err(error) => {
+                            w::muted(ui, format!("Review schedule unavailable: {error}"));
+                        }
+                    }
                     if ui.small_button("Drill").clicked() {
                         *command = Some(Command::StartPractice(vec![skill.situation]));
                     }
@@ -453,7 +464,13 @@ impl TrainerApp {
             });
             ui.add_space(14.0);
         }
-        let time = now();
+        let time = match self.now() {
+            Ok(time) => time,
+            Err(error) => {
+                w::muted(ui, format!("Review schedule unavailable: {error}"));
+                return;
+            }
+        };
         let due = self.profile.due_count(time);
         let next_due = self
             .profile
@@ -1019,7 +1036,7 @@ impl TrainerApp {
         ui.add_space(14.0);
         w::panel().show(ui, |ui| {
             ui.label(RichText::new("Your data stays here").strong());
-            ui.label(self.data_path.display().to_string());
+            ui.label(self.data_path_label());
             if ui.button("Copy data path").clicked() { ui.ctx().copy_text(self.data_path.display().to_string()); }
             w::muted(ui, "Decisions, completed rounds, review schedules, and the complete current Free Play session are saved after every accepted change. Close the app before copying the database as a backup. No telemetry or network service is used; source links open only when clicked.");
         });
