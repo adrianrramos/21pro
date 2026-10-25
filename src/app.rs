@@ -676,6 +676,13 @@ impl eframe::App for TrainerApp {
             self.startup_error_view(root);
             return;
         }
+        if self.page == Page::Insights
+            && self.profile.assessment_unlocked()
+            && !self.profile.insights_opened
+        {
+            self.profile.insights_opened = true;
+            self.persist_progress();
+        }
         let mut command = self.shortcut(&ctx);
         self.sidebar(root);
         let feedback: &[Feedback] = match self.page {

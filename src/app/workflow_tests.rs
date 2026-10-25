@@ -88,18 +88,16 @@ fn assessment_and_practice_unlock_only_after_round_250_settles() {
     click(&mut harness, "Deal first hand  [Enter]");
     harness.get_by_label("249 rounds");
     click(&mut harness, "Stand  [S]");
-
-    harness.get_by_label("250 rounds");
-    harness.get_by_label("Assessment unlocked");
     click(&mut harness, "Start focused practice");
     harness.get_by_label("HAND 1 OF 12");
+    assert!(harness.query_by_label("YOUR BASELINE").is_none());
+    assert!(harness.query_by_label("250 rounds").is_none());
 }
 
 #[test]
 fn complete_personalized_practice_without_advancing_table_baseline() {
-    let mut harness = fixture(Fixture::Insights);
-    click(&mut harness, "03   Practice");
-    click(&mut harness, "Start 12-hand session");
+    let mut harness = fixture(Fixture::Practice);
+    // Fixture::Practice starts the real 12-hand session without opening Insights.
 
     let mut decisions = 0;
     for hand in 1..=12 {
@@ -125,12 +123,26 @@ fn complete_personalized_practice_without_advancing_table_baseline() {
     harness.get_by_label("Practice complete");
     harness.get_by_label_contains("12 targeted hands");
     harness.get_by_label_contains(&format!(" / {decisions} decisions correct"));
-    harness.get_by_label("250 rounds");
+    harness.get_by_label_contains("Baseline complete. Open Insights. Practice is unlocked.");
+    assert!(harness.query_by_label("250 rounds").is_none());
+    assert!(harness.query_by_label("YOUR BASELINE").is_some());
     assert!(harness.query_by_label("Finish practice  [Enter]").is_none());
 
     click(&mut harness, "01   The table");
-    harness.get_by_label("250 rounds");
+    harness.get_by_label_contains("Baseline complete. Open Insights. Practice is unlocked.");
+    assert!(harness.query_by_label("250 rounds").is_none());
     harness.get_by_label("Deal first hand  [Enter]");
+}
+
+#[test]
+fn opening_unlocked_insights_hides_and_persists_baseline() {
+    let mut harness = fixture(Fixture::Practice);
+    harness.get_by_label_contains("Baseline complete. Open Insights. Practice is unlocked.");
+    assert!(harness.query_by_label("250 rounds").is_none());
+
+    click(&mut harness, "02   Your insights");
+    assert!(harness.query_by_label("YOUR BASELINE").is_none());
+    assert!(harness.query_by_label("250 rounds").is_none());
 }
 
 #[test]

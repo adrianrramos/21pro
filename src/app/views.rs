@@ -90,33 +90,50 @@ impl TrainerApp {
                         self.page = page;
                     }
                 }
-                ui.add_space((ui.available_height() - 274.0).max(24.0));
-                w::eyebrow(ui, "YOUR BASELINE");
-                ui.label(
-                    RichText::new(format!("{} rounds", self.profile.rounds_played()))
-                        .size(22.0)
-                        .strong(),
-                );
-                ui.add(
-                    egui::ProgressBar::new(
-                        (self.profile.rounds_played() as f32 / ASSESSMENT_ROUNDS as f32).min(1.0),
-                    )
-                    .fill(w::GREEN)
-                    .desired_height(5.0),
-                );
-                ui.label(
-                    RichText::new(if self.profile.assessment_unlocked() {
-                        "Assessment unlocked".to_owned()
+                let show_baseline =
+                    !self.profile.assessment_unlocked() || !self.profile.insights_opened;
+                let reservation = if !show_baseline {
+                    90.0
+                } else if self.profile.assessment_unlocked() {
+                    190.0
+                } else {
+                    194.0
+                };
+                ui.add_space((ui.available_height() - reservation).max(24.0));
+                if show_baseline {
+                    w::eyebrow(ui, "YOUR BASELINE");
+                    if self.profile.assessment_unlocked() {
+                        ui.label(
+                            RichText::new(
+                                "Baseline complete. Open Insights. Practice is unlocked.",
+                            )
+                            .strong(),
+                        );
                     } else {
-                        format!(
-                            "{} until your assessment",
-                            ASSESSMENT_ROUNDS.saturating_sub(self.profile.rounds_played())
-                        )
-                    })
-                    .size(12.0)
-                    .color(w::MUTED),
-                );
-                ui.add_space(16.0);
+                        ui.label(
+                            RichText::new(format!("{} rounds", self.profile.rounds_played()))
+                                .size(22.0)
+                                .strong(),
+                        );
+                        ui.add(
+                            egui::ProgressBar::new(
+                                (self.profile.rounds_played() as f32 / ASSESSMENT_ROUNDS as f32)
+                                    .min(1.0),
+                            )
+                            .fill(w::GREEN)
+                            .desired_height(5.0),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "{} until your assessment",
+                                ASSESSMENT_ROUNDS.saturating_sub(self.profile.rounds_played())
+                            ))
+                            .size(12.0)
+                            .color(w::MUTED),
+                        );
+                    }
+                    ui.add_space(16.0);
+                }
                 ui.separator();
                 ui.label(RichText::new("YAAMAVA · SIX DECK").size(11.0).strong());
                 ui.label(
