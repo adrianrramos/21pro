@@ -177,32 +177,19 @@ pub fn quarter_deck_alternate(
 
 fn quarter_deck_allowance(fraction: f64, half_deck: bool) -> f64 {
     const EPSILON: f64 = 1e-9;
-    if fraction.abs() <= EPSILON {
-        return if half_deck { -0.5 } else { -1.0 };
+    let step = if half_deck { 0.5 } else { 1.0 };
+    if fraction.abs() <= EPSILON || (half_deck && (fraction - 0.5).abs() <= EPSILON) {
+        return -step;
     }
-    if half_deck {
-        if (fraction - 0.5).abs() <= EPSILON {
-            return -0.5;
-        }
-        if (0.25 - EPSILON..0.5).contains(&fraction) {
-            return -0.5;
-        }
-        if fraction > 0.5 && fraction <= 0.75 + EPSILON {
-            return 0.5;
-        }
-        if fraction < 0.25 {
-            return 0.5;
-        }
-        if fraction > 0.75 {
-            return -0.5;
-        }
-        return 0.0;
+    // Whole-deck boundaries take precedence at the shared quarter-deck endpoints.
+    if fraction >= 0.75 - EPSILON {
+        return -step;
     }
     if fraction <= 0.25 + EPSILON {
-        return 1.0;
+        return step;
     }
-    if fraction >= 0.75 - EPSILON {
-        return -1.0;
+    if half_deck {
+        return if fraction < 0.5 { -0.5 } else { 0.5 };
     }
     0.0
 }
@@ -265,6 +252,32 @@ mod tests {
         assert_eq!(truncated_true_count(3, 2, 72, false), 3);
         assert_eq!(quarter_deck_alternate(2, 40, 3, false), Some(3));
         assert_eq!(quarter_deck_alternate(2, 14, 3, false), None);
+    }
+
+    #[test]
+    fn stepped_divisors_and_quarter_deck_endpoints_grade_exactly() {
+        for (discarded, running, half, primary, alternate) in [
+            (13, 6, false, 3, None),
+            (25, 6, true, 3, Some(4)),
+            (26, 6, true, 4, Some(3)),
+            (39, 6, false, 3, Some(6)),
+            (39, 6, true, 4, Some(6)),
+            (39, -6, true, -4, Some(-6)),
+            (52, 6, false, 6, Some(3)),
+            (52, 6, true, 6, Some(4)),
+            (65, 6, false, 6, Some(3)),
+            (65, 6, true, 6, Some(4)),
+            (91, 6, true, 12, None),
+        ] {
+            assert_eq!(truncated_true_count(running, 2, discarded, half), primary);
+            assert_eq!(
+                quarter_deck_alternate(2, discarded, running, half),
+                alternate
+            );
+        }
+        assert_eq!(truncated_true_count(-3, 2, 25, true), -1);
+        assert_eq!(truncated_true_count(-3, 2, 26, true), -2);
+        assert_eq!(truncate_toward_zero(-0.9), 0);
     }
 
     #[test]

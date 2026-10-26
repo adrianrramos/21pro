@@ -19,12 +19,12 @@ use twenty_one_pro::{
     game::{Game, GameError, Phase},
     model::{Action, HandKind, Situation},
     storage::{self, Store},
-    strategy,
+    strategy::{self, IndexComparison},
     training::{Analytics, CellStats, Profile, StudyMode},
     training_suite::{
         AssessmentSession, BasicStrategyDrill, CoreIndexDrill, DrillFeedback, GradeBucket,
         PressurePrompt, PressureTable, RunningCountAdvance, RunningCountDrill, TablePractice,
-        ToolId, ToolSession, TrueCountDrill, dealing_delay_for_speed, pressure_answer,
+        ToolId, ToolSession, TrueCountDrill, dealing_delay_for_speed,
     },
 };
 
@@ -68,10 +68,19 @@ enum SuiteActivity {
     CoreIndex(CoreIndexDrill),
     TablePractice(TablePractice),
     Assessment(AssessmentSession),
-    PressureTable(PressureTable),
+    PressureTable(Box<PressureTable>),
 }
 const RUNNING_COUNT_ROUND_CLEAR_PAUSE: Duration = Duration::from_secs(3);
 const RUNNING_COUNT_CARD_SLIDE_DURATION: Duration = Duration::from_millis(280);
+
+const fn comparison_label(comparison: IndexComparison) -> &'static str {
+    match comparison {
+        IndexComparison::Less => "<",
+        IndexComparison::LessOrEqual => "≤",
+        IndexComparison::Greater => ">",
+        IndexComparison::GreaterOrEqual => "≥",
+    }
+}
 
 enum Command {
     Deal,
@@ -88,7 +97,7 @@ enum Command {
     SuiteSetDealingSpeed(u8),
     SuiteTrueCountAngle(i8),
     SuiteAdjustInput(i32),
-    SuiteSetInput(i32),
+    SuiteSetComparison(IndexComparison),
     SuiteSetTrueCountDecks(usize),
     SuiteSetHalfDeck(bool),
     SuiteSetTrueCountDuration(u64),
@@ -129,11 +138,11 @@ pub struct TrainerApp {
     suite: Option<SuiteActivity>,
     suite_input: String,
     suite_selected_action: Option<Action>,
+    suite_comparison: IndexComparison,
     suite_feedback: Option<DrillFeedback>,
     suite_message: Option<String>,
     suite_report: Option<ToolSession>,
     suite_pressure_prompt: Option<PressurePrompt>,
-    suite_pressure_prompt_started_at: Option<Instant>,
     suite_pressure_decision_started_at: Option<Instant>,
     suite_running_next_step_at: Option<Instant>,
     suite_running_clear_at: Option<Instant>,
@@ -248,11 +257,11 @@ impl TrainerApp {
             suite: None,
             suite_input: String::new(),
             suite_selected_action: None,
+            suite_comparison: IndexComparison::GreaterOrEqual,
             suite_feedback: None,
             suite_message: None,
             suite_report: None,
             suite_pressure_prompt: None,
-            suite_pressure_prompt_started_at: None,
             suite_pressure_decision_started_at: None,
             suite_running_next_step_at: None,
             suite_running_clear_at: None,
@@ -427,13 +436,13 @@ impl TrainerApp {
     fn start_suite(&mut self, tool: ToolId) {
         let seed = self.suite_seed;
         self.suite_seed = self.suite_seed.wrapping_add(1);
-        self.suite_input.clear();
+        self.suite_input = "0".to_owned();
         self.suite_selected_action = None;
+        self.suite_comparison = IndexComparison::GreaterOrEqual;
         self.suite_feedback = None;
         self.suite_message = None;
         self.suite_report = None;
         self.suite_pressure_prompt = None;
-        self.suite_pressure_prompt_started_at = None;
         self.suite_pressure_decision_started_at = None;
         self.suite_running_next_step_at = None;
         self.suite_running_clear_at = None;
@@ -479,7 +488,7 @@ impl TrainerApp {
                 SuiteActivity::Assessment(AssessmentSession::new(seed, settings.clone()))
             }
             ToolId::PressureTable => {
-                SuiteActivity::PressureTable(PressureTable::new(seed, settings))
+                SuiteActivity::PressureTable(Box::new(PressureTable::new(seed, settings)))
             }
         };
         self.suite = Some(activity);
@@ -500,30 +509,15 @@ impl TrainerApp {
         self.persist_progress();
     }
     fn begin_pressure_prompt(&mut self) {
-        let (mispay, ghost_changed, ghost_occupied) = match self.suite.as_ref() {
-            Some(SuiteActivity::PressureTable(table)) => (
-                table.mispay.is_some(),
-                table.ghost.changed,
-                table.ghost.occupied,
-            ),
-            _ => return,
+        let Some(SuiteActivity::PressureTable(table)) = self.suite.as_ref() else {
+            return;
         };
-        let prompt = if mispay {
-            PressurePrompt::Mispay {
-                dealer_mispayed: true,
-            }
-        } else if ghost_changed {
-            PressurePrompt::GhostChange {
-                occupied: ghost_occupied,
-            }
-        } else {
-            PressurePrompt::Math {
-                left: 2 + (self.suite_attempts % 8) as u8,
-                right: 2 + ((self.suite_attempts / 8) % 8) as u8,
-            }
-        };
-        self.suite_pressure_prompt = Some(prompt);
-        self.suite_pressure_prompt_started_at = Some(Instant::now());
+        self.suite_pressure_prompt = table.pending_prompt();
+        if self.suite_pressure_prompt.is_some() || table.table.game.situation().is_none() {
+            self.suite_pressure_decision_started_at = None;
+        } else if self.suite_pressure_decision_started_at.is_none() {
+            self.suite_pressure_decision_started_at = Some(Instant::now());
+        }
     }
     fn tick_running_count(&mut self, now: Instant) {
         if let Some(clear_at) = self.suite_running_clear_at {
@@ -802,8 +796,8 @@ impl TrainerApp {
                 let value = self.suite_input.parse::<i32>().unwrap_or_default();
                 self.suite_input = value.saturating_add(delta).to_string();
             }
-            Command::SuiteSetInput(value) => {
-                self.suite_input = value.to_string();
+            Command::SuiteSetComparison(comparison) => {
+                self.suite_comparison = comparison;
             }
             Command::SuiteSetTrueCountDecks(decks) => {
                 if matches!(decks, 2 | 4 | 6 | 8) {
@@ -828,93 +822,80 @@ impl TrainerApp {
             Command::StartSuite(tool) => {
                 self.start_suite(tool);
                 if let Some(SuiteActivity::PressureTable(table)) = self.suite.as_mut() {
-                    match table.deal() {
-                        Ok(()) => {
-                            self.suite_pressure_decision_started_at = Some(Instant::now());
-                        }
-                        Err(error) => {
-                            self.error = Some(format!("Cannot start pressure round: {error}"));
-                        }
+                    if let Err(error) = table.deal() {
+                        self.error = Some(format!("Cannot start pressure round: {error}"));
                     }
+                    self.begin_pressure_prompt();
                 }
             }
             Command::SuiteAct(action) => {
-                let mut outcome = None;
-                let mut bucket = GradeBucket::BasicStrategy;
-                let mut pressure_round_finished = false;
+                if self.suite_pressure_prompt.is_some()
+                    || (self.suite_feedback.is_some()
+                        && matches!(
+                            self.suite,
+                            Some(SuiteActivity::BasicStrategy(_) | SuiteActivity::CoreIndex(_))
+                        ))
+                {
+                    return;
+                }
                 let mut pressure_action_taken = false;
-                if let Some(activity) = self.suite.as_mut() {
-                    match activity {
-                        SuiteActivity::BasicStrategy(drill) => {
-                            outcome = drill.submit(action);
-                            bucket = GradeBucket::BasicStrategy;
-                        }
-                        SuiteActivity::CoreIndex(_) => {
+                let outcome = match self.suite.as_mut() {
+                    Some(SuiteActivity::BasicStrategy(drill)) => Ok(drill.submit(action)),
+                    Some(SuiteActivity::CoreIndex(drill)) => {
+                        if drill
+                            .current()
+                            .is_some_and(|scenario| scenario.situation.allows(action))
+                        {
                             self.suite_selected_action = Some(action);
                         }
-                        SuiteActivity::TablePractice(table) => {
-                            if let Ok(feedback) = table.act_and_grade(action) {
-                                bucket = if feedback.source == strategy::StrategySource::CoreIndex {
-                                    GradeBucket::Deviation
-                                } else {
-                                    GradeBucket::BasicStrategy
-                                };
-                                outcome = Some(feedback);
-                            }
-                        }
-                        SuiteActivity::PressureTable(table) => {
-                            if let Ok(feedback) = table.act_and_grade(action) {
-                                pressure_action_taken = true;
-                                pressure_round_finished = table.table.game.phase == Phase::Finished
-                                    && !table.table.pending_count;
-                                bucket = if feedback.source == strategy::StrategySource::CoreIndex {
-                                    GradeBucket::Deviation
-                                } else {
-                                    GradeBucket::BasicStrategy
-                                };
-                                outcome = Some(feedback);
-                            }
-                        }
-                        SuiteActivity::Assessment(session) => {
-                            if let Ok(feedback) = session.act_and_grade(action) {
-                                bucket = if feedback.source == strategy::StrategySource::CoreIndex {
-                                    GradeBucket::Deviation
-                                } else {
-                                    GradeBucket::BasicStrategy
-                                };
-                                outcome = Some(feedback);
-                            }
-                        }
-                        SuiteActivity::RunningCount(_) | SuiteActivity::TrueCount(_) => {}
+                        Ok(None)
                     }
-                }
-                if let Some(feedback) = outcome {
-                    self.suite_feedback = Some(feedback);
-                    self.suite_record(bucket, feedback.correct);
+                    Some(SuiteActivity::TablePractice(table)) => {
+                        table.act_and_grade(action).map(Some)
+                    }
+                    Some(SuiteActivity::PressureTable(table)) => {
+                        table.act_and_grade(action).map(|feedback| {
+                            pressure_action_taken = true;
+                            Some(feedback)
+                        })
+                    }
+                    Some(SuiteActivity::Assessment(session)) => {
+                        session.act_and_grade(action).map(Some)
+                    }
+                    _ => Ok(None),
+                };
+                match outcome {
+                    Ok(Some(feedback)) => {
+                        let bucket = if matches!(
+                            feedback.expected,
+                            Action::Insure | Action::DeclineInsurance
+                        ) {
+                            GradeBucket::Insurance
+                        } else if feedback.source == strategy::StrategySource::CoreIndex {
+                            GradeBucket::Deviation
+                        } else {
+                            GradeBucket::BasicStrategy
+                        };
+                        self.suite_feedback = Some(feedback);
+                        self.suite_record(bucket, feedback.correct);
+                    }
+                    Ok(None) => {}
+                    Err(error) => self.error = Some(format!("Cannot play suite action: {error}")),
                 }
                 if pressure_action_taken {
-                    let elapsed = self
-                        .suite_pressure_decision_started_at
-                        .take()
-                        .map_or(0, |started| started.elapsed().as_secs());
-                    let pressure_continues = matches!(
-                        self.suite.as_ref(),
-                        Some(SuiteActivity::PressureTable(table))
-                            if table.table.game.phase == Phase::Playing
-                    );
-                    let timely = elapsed <= u64::from(PressureTable::DECISION_LIMIT_SECS);
-                    self.suite_record(GradeBucket::Timing, timely);
-                    if !timely {
-                        self.suite_message = Some(format!(
-                            "Late decision: {elapsed}s · limit {}s",
-                            PressureTable::DECISION_LIMIT_SECS
-                        ));
+                    if let Some(started) = self.suite_pressure_decision_started_at.take() {
+                        let elapsed = started.elapsed();
+                        let timely = elapsed
+                            <= Duration::from_secs(u64::from(PressureTable::DECISION_LIMIT_SECS));
+                        self.suite_record(GradeBucket::Timing, timely);
+                        if !timely {
+                            self.suite_message = Some(format!(
+                                "Late decision: {:.1}s · limit {}s",
+                                elapsed.as_secs_f32(),
+                                PressureTable::DECISION_LIMIT_SECS
+                            ));
+                        }
                     }
-                    if pressure_continues {
-                        self.suite_pressure_decision_started_at = Some(Instant::now());
-                    }
-                }
-                if pressure_round_finished && self.suite_pressure_prompt.is_none() {
                     self.begin_pressure_prompt();
                 }
             }
@@ -928,11 +909,8 @@ impl TrainerApp {
                     }
                     _ => None,
                 };
-                let mut pressure_dealt = false;
-                let mut pressure_event = false;
-                match self.suite.as_mut() {
-                    Some(SuiteActivity::RunningCount(_)) => {}
-                    Some(SuiteActivity::TrueCount(_)) => {
+                let result = match self.suite.as_mut() {
+                    Some(SuiteActivity::TrueCount(drill)) if drill.feedback.is_some() => {
                         let seed = self.suite_seed;
                         self.suite_seed = self.suite_seed.wrapping_add(1);
                         let settings = &self.profile.suite_settings;
@@ -944,53 +922,50 @@ impl TrainerApp {
                         ) {
                             Ok(drill) => self.suite = Some(SuiteActivity::TrueCount(drill)),
                             Err(error) => {
-                                self.error = Some(format!("Cannot start True Count round: {error}"))
+                                self.error =
+                                    Some(format!("Cannot start True Count round: {error}"));
+                                return;
                             }
                         }
-                        self.suite_feedback = None;
-                        self.suite_message = None;
+                        Ok(())
                     }
-                    Some(SuiteActivity::BasicStrategy(_)) | Some(SuiteActivity::CoreIndex(_)) => {}
-                    Some(SuiteActivity::TablePractice(table)) => {
+                    Some(SuiteActivity::BasicStrategy(_) | SuiteActivity::CoreIndex(_))
+                        if self.suite_feedback.is_some() =>
+                    {
+                        Ok(())
+                    }
+                    Some(SuiteActivity::TablePractice(table))
                         if matches!(table.game.phase, Phase::Ready | Phase::Finished)
-                            && !table.pending_count
-                        {
-                            let _ = table.deal();
-                        }
+                            && !table.pending_count =>
+                    {
+                        table.deal()
                     }
-                    Some(SuiteActivity::PressureTable(table)) => {
+                    Some(SuiteActivity::PressureTable(table))
                         if matches!(table.table.game.phase, Phase::Ready | Phase::Finished)
                             && !table.table.pending_count
-                            && self.suite_pressure_prompt.is_none()
-                        {
-                            if let Err(error) = table.deal() {
-                                self.error = Some(format!("Cannot deal pressure round: {error}"));
-                            } else {
-                                pressure_dealt = true;
-                                pressure_event = table.ghost.changed;
-                            }
-                        }
+                            && self.suite_pressure_prompt.is_none() =>
+                    {
+                        table.deal()
                     }
                     Some(SuiteActivity::Assessment(session))
                         if matches!(session.table.game.phase, Phase::Ready | Phase::Finished)
                             && !session.table.pending_count
                             && !session.table.past_cut() =>
                     {
-                        let _ = session.table.deal();
+                        session.deal()
                     }
-                    _ => {}
+                    _ => return,
+                };
+                if let Err(error) = result {
+                    self.error = Some(format!("Cannot deal suite round: {error}"));
+                    return;
                 }
                 self.suite_feedback = None;
-                self.suite_input.clear();
+                self.suite_message = None;
+                self.suite_input = "0".to_owned();
                 self.suite_selected_action = None;
-                if pressure_dealt {
-                    self.suite_pressure_decision_started_at = Some(Instant::now());
-                    if pressure_event {
-                        self.begin_pressure_prompt();
-                    }
-                } else if !matches!(self.suite.as_ref(), Some(SuiteActivity::PressureTable(_))) {
-                    self.suite_pressure_decision_started_at = None;
-                }
+                self.suite_comparison = IndexComparison::GreaterOrEqual;
+                self.begin_pressure_prompt();
                 if let Some(tool) = completed_tool {
                     self.suite_finish(tool, true, Some(self.suite_correct == self.suite_attempts));
                     self.suite = None;
@@ -998,10 +973,9 @@ impl TrainerApp {
                 }
             }
             Command::SuiteSubmit => {
-                let input = self.suite_input.parse::<i32>().ok();
-                let selected_action = self.suite_selected_action.take();
-                let mut pressure_count_finished = false;
-                let mut pressure_event_remains = false;
+                let input = parse_submitted_count(&self.suite_input);
+                let selected_action = self.suite_selected_action;
+                let comparison = self.suite_comparison;
                 let mut running_count_feedback = None;
                 let mut record = None;
                 if let Some(activity) = self.suite.as_mut() {
@@ -1015,7 +989,9 @@ impl TrainerApp {
                             }
                         }
                         SuiteActivity::TrueCount(drill) => {
-                            if let Some(submitted) = input {
+                            if let Some(submitted) = input
+                                && drill.feedback.is_none()
+                            {
                                 let feedback = drill.submit(submitted);
                                 record = Some((GradeBucket::Count, feedback.correct));
                                 self.suite_message = Some(if feedback.within_quarter_deck {
@@ -1034,7 +1010,9 @@ impl TrainerApp {
                             }
                         }
                         SuiteActivity::TablePractice(table) => {
-                            if let Some(submitted) = input {
+                            if let Some(submitted) = input
+                                && table.pending_count
+                            {
                                 let correct = table.submit_count(submitted);
                                 record = Some((GradeBucket::Count, correct));
                                 self.suite_message = Some(format!(
@@ -1045,72 +1023,61 @@ impl TrainerApp {
                             }
                         }
                         SuiteActivity::PressureTable(table) => {
-                            if let Some(prompt) = self.suite_pressure_prompt {
-                                if let Some(submitted) = input {
-                                    let prompt = match prompt {
-                                        PressurePrompt::TimedDecision { limit_secs, .. } => {
-                                            let elapsed = self
-                                                .suite_pressure_prompt_started_at
-                                                .map_or(0, |started| {
-                                                    started
-                                                        .elapsed()
-                                                        .as_secs()
-                                                        .min(u64::from(u8::MAX))
-                                                        as u8
-                                                });
-                                            PressurePrompt::TimedDecision {
-                                                limit_secs,
-                                                elapsed_secs: elapsed,
-                                            }
-                                        }
-                                        prompt => prompt,
-                                    };
-                                    let correct = pressure_answer(prompt, submitted);
-                                    let bucket = match prompt {
-                                        PressurePrompt::Math { .. } => GradeBucket::Math,
-                                        PressurePrompt::Mispay { .. } => GradeBucket::Mispay,
-                                        PressurePrompt::TimedDecision { .. } => GradeBucket::Timing,
-                                        PressurePrompt::GhostChange { .. } => {
-                                            GradeBucket::Deviation
-                                        }
-                                    };
-                                    self.suite_pressure_prompt = None;
-                                    self.suite_pressure_prompt_started_at = None;
-                                    match prompt {
-                                        PressurePrompt::Mispay { .. } => table.resolve_mispay(),
-                                        PressurePrompt::GhostChange { .. } => {
-                                            table.resolve_ghost_change()
-                                        }
-                                        _ => {}
+                            if let Some(submitted) = input {
+                                if self.suite_pressure_prompt.is_some() {
+                                    record = table.submit_pressure(submitted);
+                                    if let Some((_, correct)) = record {
+                                        self.suite_message = Some(if correct {
+                                            "Correct pressure response.".to_owned()
+                                        } else {
+                                            "Incorrect pressure response.".to_owned()
+                                        });
                                     }
-                                    pressure_event_remains =
-                                        table.mispay.is_some() || table.ghost.changed;
-                                    record = Some((bucket, correct));
-                                    self.suite_message = Some(if correct {
-                                        "Correct pressure response.".to_owned()
-                                    } else {
-                                        "Incorrect pressure response.".to_owned()
-                                    });
+                                } else if table.pending_count() {
+                                    let correct = table.submit_count(submitted);
+                                    record = Some((GradeBucket::Count, correct));
+                                    self.suite_message = Some(format!(
+                                        "{} · expected {:+}",
+                                        if correct { "Correct" } else { "Incorrect" },
+                                        table.expected_count()
+                                    ));
                                 }
-                            } else if let Some(submitted) = input {
-                                let correct = table.submit_count(submitted);
-                                pressure_count_finished = table.table.game.phase == Phase::Finished
-                                    && !table.table.pending_count;
-                                record = Some((GradeBucket::Count, correct));
                             }
                         }
                         SuiteActivity::CoreIndex(drill) => {
-                            if let (Some(action), Some(index)) = (selected_action, input)
-                                && let Some(feedback) = drill.submit(action, index as f32)
+                            if self.suite_feedback.is_none()
+                                && let (Some(action), Some(index), Some(scenario)) =
+                                    (selected_action, input, drill.current())
+                                && let Some(feedback) =
+                                    drill.submit(action, comparison, index as f32)
                             {
                                 record = Some((GradeBucket::Deviation, feedback.correct));
                                 self.suite_feedback = Some(feedback);
+                                self.suite_message = Some(format!(
+                                    "{} · your {} at TC {} {} · correct {} at TC {} {}",
+                                    if feedback.correct {
+                                        "Correct"
+                                    } else {
+                                        "Incorrect"
+                                    },
+                                    action.label(),
+                                    comparison_label(comparison),
+                                    index,
+                                    scenario.play.action.label(),
+                                    comparison_label(scenario.play.comparison),
+                                    scenario.play.threshold
+                                ));
                             }
                         }
                         SuiteActivity::Assessment(session) => {
-                            if let Some(submitted) = input {
-                                let correct = session.table.submit_count(submitted);
-                                session.record_answer(correct);
+                            if let Some(submitted) = input
+                                && let Some(correct) = session.submit_count(submitted)
+                            {
+                                self.suite_message = Some(format!(
+                                    "{} · expected {:+}",
+                                    if correct { "Correct" } else { "Incorrect" },
+                                    session.table.expected_count()
+                                ));
                                 record = Some((GradeBucket::Count, correct));
                             }
                         }
@@ -1129,10 +1096,7 @@ impl TrainerApp {
                         self.suite_message = Some(if passed {
                             "Running Count report: PASSED.".to_owned()
                         } else {
-                            format!(
-                                "Running Count report: NOT PASSED · actual {:+}.",
-                                feedback.expected
-                            )
+                            format!("Final count: actual {:+}.", feedback.expected)
                         });
                     } else {
                         self.suite_running_next_step_at = None;
@@ -1145,12 +1109,12 @@ impl TrainerApp {
                         });
                     }
                 }
-                if (pressure_count_finished || pressure_event_remains)
-                    && self.suite_pressure_prompt.is_none()
-                {
+                if record.is_some() {
+                    self.suite_input = "0".to_owned();
                     self.begin_pressure_prompt();
+                } else if input.is_none() {
+                    self.suite_message = Some("Enter a signed whole number.".to_owned());
                 }
-                self.suite_input.clear();
             }
             Command::SuiteRestart => {
                 if matches!(self.suite, Some(SuiteActivity::RunningCount(_))) {
@@ -1208,12 +1172,19 @@ impl TrainerApp {
     }
 
     fn shortcut(&self, ctx: &egui::Context) -> Option<Command> {
-        if self.dirty || ctx.egui_wants_keyboard_input() {
+        if self.dirty {
             return None;
         }
+        let wants_keyboard_input = ctx.egui_wants_keyboard_input();
         ctx.input(|input| {
             if input.modifiers.any() {
                 return None;
+            }
+            if wants_keyboard_input {
+                return (self.page == Page::TrainingSuite
+                    && self.suite.is_some()
+                    && input.key_pressed(egui::Key::Enter))
+                .then_some(Command::SuiteSubmit);
             }
             if self.page == Page::TrainingSuite {
                 if let Some(SuiteActivity::RunningCount(drill)) = self.suite.as_ref() {
@@ -1323,9 +1294,9 @@ impl eframe::App for TrainerApp {
                 })
         );
         if true_count_timed_out {
-            self.suite_finish(ToolId::TrueCount, true, Some(false));
+            let passed = self.suite_attempts > 0 && self.suite_correct == self.suite_attempts;
+            self.suite_finish(ToolId::TrueCount, true, Some(passed));
             self.suite = None;
-            self.suite_message = Some("True Count time expired. No pass is recorded.".into());
         }
         if self.dirty && !self.allow_close && ctx.input(|input| input.viewport().close_requested())
         {
@@ -1379,7 +1350,13 @@ impl eframe::App for TrainerApp {
                     });
                     ui.add_space(14.0);
                 }
-            egui::ScrollArea::vertical().id_salt(egui::Id::new("page-scroll").with(self.page as u8)).show(ui, |ui| {
+            let scroll_id = egui::Id::new("page-scroll").with(self.page as u8);
+            let scroll_id = if self.page == Page::TrainingSuite {
+                scroll_id.with(self.suite.as_ref().map(std::mem::discriminant))
+            } else {
+                scroll_id
+            };
+            egui::ScrollArea::vertical().id_salt(scroll_id).show(ui, |ui| {
                 ui.add_enabled_ui(!self.dirty, |ui| {
                     match self.page {
                         Page::Table => self.table_view(ui, &mut command),
@@ -1707,6 +1684,61 @@ mod tests {
         assert!(app.error.is_none());
         assert_eq!(
             app.store.as_ref().unwrap().load().unwrap().rounds_played(),
+            1
+        );
+    }
+
+    #[test]
+    fn true_count_is_graded_once_and_a_perfect_timed_session_passes() {
+        let (_directory, mut app) = app_with_store();
+        app.execute(Command::StartSuite(ToolId::TrueCount));
+        let answer = match app.suite.as_ref().unwrap() {
+            SuiteActivity::TrueCount(drill) => drill.answer(),
+            _ => unreachable!(),
+        };
+        app.suite_input = answer.to_string();
+        app.execute(Command::SuiteSubmit);
+        app.suite_input = answer.to_string();
+        app.execute(Command::SuiteSubmit);
+        assert_eq!((app.suite_attempts, app.suite_correct), (1, 1));
+        app.suite_started_at = Some(Instant::now() - Duration::from_secs(91));
+        let context = egui::Context::default();
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| app.ui(ui, &mut frame));
+        output.textures_delta.clear();
+        assert!(app.suite.is_none());
+        let report = app.suite_report.as_ref().unwrap();
+        assert_eq!(report.passed, Some(true));
+        assert_eq!((report.attempts, report.correct), (1, 1));
+        let saved = app.store.as_ref().unwrap().load().unwrap();
+        assert_eq!(saved.suite_sessions.last().unwrap().passed, Some(true));
+        assert_eq!(saved.suite_stats.attempts, 1);
+        assert!(saved.rounds.is_empty());
+        assert!(saved.attempts.is_empty());
+    }
+
+    #[test]
+    fn suite_counts_cannot_be_graded_without_an_unanswered_checkpoint() {
+        let (_directory, mut app) = app_with_store();
+        app.suite_seed = 7;
+        app.execute(Command::StartSuite(ToolId::TablePractice));
+        app.execute(Command::SuiteSubmit);
+        assert_eq!(app.suite_attempts, 0);
+        app.execute(Command::SuiteNext);
+        app.execute(Command::SuiteAct(Action::Stand));
+        let answer = match app.suite.as_ref().unwrap() {
+            SuiteActivity::TablePractice(table) => {
+                assert!(table.pending_count);
+                table.expected_count()
+            }
+            _ => unreachable!(),
+        };
+        app.suite_input = answer.to_string();
+        app.execute(Command::SuiteSubmit);
+        app.suite_input = answer.to_string();
+        app.execute(Command::SuiteSubmit);
+        assert_eq!(
+            app.profile.suite_stats.buckets[&GradeBucket::Count].attempts,
             1
         );
     }

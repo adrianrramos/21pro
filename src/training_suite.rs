@@ -13,10 +13,12 @@ use crate::{
     counting::{quarter_deck_alternate, running_count, true_count_divisor, truncated_true_count},
     game::{Game, GameError, HandStatus, Phase},
     model::{Action, Card, HandKind, Rank, Situation, Suit},
-    strategy::{self, IndexPlay, StrategySource},
+    strategy::{self, IndexComparison, IndexPlay, StrategySource},
 };
 
 pub const SUITE_RULESET_ID: &str = crate::model::RULESET_ID;
+// Stop before Game's automatic shuffle so the learner can answer the final count.
+const SUITE_CUT_CARD: usize = 68;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ToolId {
@@ -275,33 +277,32 @@ pub struct StrategyScenario {
 pub fn basic_strategy_catalog(include_multi_card: bool) -> Vec<StrategyScenario> {
     let mut scenarios = Vec::new();
     for dealer in 2..=11 {
-        for value in 4..=21 {
-            scenarios.push(StrategyScenario {
-                situation: Situation {
-                    kind: HandKind::Hard,
-                    value,
-                    dealer,
-                    can_double: true,
-                    can_split: false,
-                    can_surrender: true,
-                    split_aces: false,
-                },
-                card_count: 2,
-            });
-        }
-        for value in 13..=21 {
-            scenarios.push(StrategyScenario {
-                situation: Situation {
-                    kind: HandKind::Soft,
-                    value,
-                    dealer,
-                    can_double: true,
-                    can_split: false,
-                    can_surrender: false,
-                    split_aces: false,
-                },
-                card_count: 2,
-            });
+        for card_count in 2..=if include_multi_card { 4 } else { 2 } {
+            for kind in [HandKind::Hard, HandKind::Soft] {
+                let minimum = if kind == HandKind::Hard {
+                    2 * card_count
+                } else {
+                    (10 + card_count).max(13)
+                };
+                for value in minimum..=20 {
+                    // Opening 2,2 and ten pairs belong to the pair catalog.
+                    if kind == HandKind::Hard && card_count == 2 && matches!(value, 4 | 20) {
+                        continue;
+                    }
+                    scenarios.push(StrategyScenario {
+                        situation: Situation {
+                            kind,
+                            value,
+                            dealer,
+                            can_double: card_count == 2,
+                            can_split: false,
+                            can_surrender: card_count == 2,
+                            split_aces: false,
+                        },
+                        card_count,
+                    });
+                }
+            }
         }
         for value in 2..=11 {
             scenarios.push(StrategyScenario {
@@ -316,40 +317,6 @@ pub fn basic_strategy_catalog(include_multi_card: bool) -> Vec<StrategyScenario>
                 },
                 card_count: 2,
             });
-        }
-        if include_multi_card {
-            for value in 5..=21 {
-                for card_count in [3, 4] {
-                    scenarios.push(StrategyScenario {
-                        situation: Situation {
-                            kind: HandKind::Hard,
-                            value,
-                            dealer,
-                            can_double: false,
-                            can_split: false,
-                            can_surrender: false,
-                            split_aces: false,
-                        },
-                        card_count,
-                    });
-                }
-            }
-            for value in 13..=21 {
-                for card_count in [3, 4] {
-                    scenarios.push(StrategyScenario {
-                        situation: Situation {
-                            kind: HandKind::Soft,
-                            value,
-                            dealer,
-                            can_double: false,
-                            can_split: false,
-                            can_surrender: false,
-                            split_aces: false,
-                        },
-                        card_count,
-                    });
-                }
-            }
         }
     }
     scenarios
@@ -379,6 +346,9 @@ impl BasicStrategyDrill {
 
     pub fn submit(&mut self, chosen: Action) -> Option<DrillFeedback> {
         let scenario = self.current()?;
+        if !scenario.situation.allows(chosen) {
+            return None;
+        }
         let expected = strategy::recommendation(scenario.situation).action;
         let feedback = DrillFeedback {
             chosen,
@@ -418,7 +388,7 @@ impl CoreIndexDrill {
                     kind: play.kind,
                     value: play.value,
                     dealer: play.dealer,
-                    can_double: true,
+                    can_double: play.kind != HandKind::Insurance,
                     can_split: play.kind == HandKind::Pair,
                     can_surrender: play.surrender_only,
                     split_aces: false,
@@ -436,25 +406,25 @@ impl CoreIndexDrill {
         self.queue.get(self.completed).copied()
     }
 
-    pub fn submit(&mut self, chosen: Action, entered_index: f32) -> Option<DrillFeedback> {
+    pub fn submit(
+        &mut self,
+        chosen: Action,
+        comparison: IndexComparison,
+        entered_index: f32,
+    ) -> Option<DrillFeedback> {
         let scenario = self.current()?;
-        let (recommendation, source) = strategy::graded_action(
-            scenario.situation,
-            Some(scenario.play.threshold),
-            strategy::core_index_plays(),
-        );
-        let correct = chosen == recommendation.action
-            && (entered_index - scenario.play.threshold).abs() <= f32::EPSILON;
+        if !scenario.situation.allows(chosen) {
+            return None;
+        }
+        let correct = chosen == scenario.play.action
+            && comparison == scenario.play.comparison
+            && entered_index == scenario.play.threshold;
         self.completed += 1;
         Some(DrillFeedback {
-            chosen: if correct {
-                recommendation.action
-            } else {
-                chosen
-            },
-            expected: recommendation.action,
+            chosen,
+            expected: scenario.play.action,
             correct,
-            source,
+            source: StrategySource::CoreIndex,
         })
     }
 
@@ -616,7 +586,7 @@ impl RunningCountDrill {
     }
 
     pub fn past_cut(&self) -> bool {
-        self.game.past_cut()
+        self.game.remaining_cards() <= SUITE_CUT_CARD
     }
 
     pub fn submit_count(&mut self, submitted: i32) -> Option<RunningCountFeedback> {
@@ -635,7 +605,7 @@ impl RunningCountDrill {
     }
 
     fn complete_round(&mut self) {
-        let past_cut = self.game.past_cut();
+        let past_cut = self.past_cut();
         self.checkpoint = count_checkpoint(self.rounds, self.interval, past_cut, past_cut);
         self.rounds += 1;
         self.round_complete = true;
@@ -705,13 +675,12 @@ fn append_running_count_transition(frames: &mut Vec<Game>, after: &Game) {
         .as_ref()
         .is_some_and(|result| result.dealer_blackjack);
     if !dealer_blackjack && after.dealer.len() >= 2 {
-        let mut hole_hidden = after.clone();
-        hole_hidden.dealer.truncate(2);
-        hole_hidden.phase = Phase::Playing;
-        hole_hidden.result = None;
-        frames.push(hole_hidden.clone());
+        let mut dealer_reveal = after.clone();
+        dealer_reveal.dealer.truncate(2);
+        dealer_reveal.result = None;
+        frames.push(dealer_reveal.clone());
         for dealer_len in 3..after.dealer.len() {
-            let mut dealer_hit = hole_hidden.clone();
+            let mut dealer_hit = dealer_reveal.clone();
             dealer_hit.dealer = after.dealer[..dealer_len].to_vec();
             frames.push(dealer_hit);
         }
@@ -849,6 +818,7 @@ impl TrueCountDrill {
     }
 }
 
+/// Self-paced table play with checkpoints, including the last count before shuffle.
 #[derive(Debug, Clone)]
 pub struct TablePractice {
     pub game: Game,
@@ -856,6 +826,7 @@ pub struct TablePractice {
     pub rounds: usize,
     pub pending_count: bool,
     pub finished: bool,
+    shoe_rounds: usize,
 }
 
 impl TablePractice {
@@ -866,6 +837,7 @@ impl TablePractice {
             rounds: 0,
             pending_count: false,
             finished: false,
+            shoe_rounds: 0,
         }
     }
 
@@ -873,45 +845,71 @@ impl TablePractice {
         if self.finished || self.pending_count {
             return Err(GameError::RoundInProgress);
         }
-        self.game.deal()
+        let new_shoe = self.game.phase == Phase::Finished && self.past_cut();
+        self.game.deal()?;
+        if new_shoe {
+            self.shoe_rounds = 0;
+        }
+        self.complete_round();
+        Ok(())
     }
 
     pub fn act(&mut self, action: Action) -> Result<(), GameError> {
-        self.game.act(action)?;
-        if self.game.phase == Phase::Finished {
-            let checkpoint = count_checkpoint(
-                self.rounds,
-                self.settings.count_every,
-                self.past_cut(),
-                false,
-            );
-            self.rounds += 1;
-            self.pending_count = checkpoint.prompt;
+        if self.finished || self.pending_count {
+            return Err(GameError::RoundInProgress);
         }
+        self.game.act(action)?;
+        self.complete_round();
         Ok(())
+    }
+
+    fn complete_round(&mut self) {
+        if self.game.phase == Phase::Finished {
+            let past_cut = self.past_cut();
+            self.pending_count = count_checkpoint(
+                self.shoe_rounds,
+                self.settings.count_every,
+                past_cut,
+                past_cut,
+            )
+            .prompt;
+            self.rounds += 1;
+            self.shoe_rounds += 1;
+        }
     }
     pub fn act_and_grade(&mut self, action: Action) -> Result<DrillFeedback, GameError> {
         let situation = self
             .game
             .situation()
             .ok_or(GameError::InvalidState("no suite decision is pending"))?;
-        let true_count = truncated_true_count(
-            self.game.running_count(),
-            6,
-            self.game.discarded_count(),
-            self.settings.half_deck,
-        );
+        let running_count = self.game.running_count();
+        let discarded = self.game.discarded_count();
+        let true_count = truncated_true_count(running_count, 6, discarded, self.settings.half_deck);
         let (recommendation, source) = strategy::graded_action(
             situation,
             Some(true_count as f32),
             strategy::core_index_plays(),
         );
+        let alternate_match = if action == recommendation.action {
+            None
+        } else {
+            quarter_deck_alternate(6, discarded, running_count, self.settings.half_deck)
+                .map(|count| {
+                    strategy::graded_action(
+                        situation,
+                        Some(count as f32),
+                        strategy::core_index_plays(),
+                    )
+                })
+                .filter(|(alternate, _)| action == alternate.action)
+        };
         self.act(action)?;
         Ok(DrillFeedback {
             chosen: action,
-            expected: recommendation.action,
-            correct: action == recommendation.action,
-            source,
+            expected: alternate_match
+                .map_or(recommendation.action, |(alternate, _)| alternate.action),
+            correct: action == recommendation.action || alternate_match.is_some(),
+            source: alternate_match.map_or(source, |(_, source)| source),
         })
     }
 
@@ -919,11 +917,11 @@ impl TablePractice {
         self.game.running_count()
     }
     pub fn past_cut(&self) -> bool {
-        self.game.past_cut() || self.game.remaining_cards() <= 68
+        self.game.remaining_cards() <= SUITE_CUT_CARD
     }
 
     pub fn submit_count(&mut self, submitted: i32) -> bool {
-        if !self.pending_count {
+        if self.finished || !self.pending_count {
             return false;
         }
         self.pending_count = false;
@@ -944,7 +942,7 @@ pub struct GhostSeat {
     pub action: Option<Action>,
 }
 
-/// A deterministic expected-versus-paid settlement mismatch.
+/// The actual settlement compared with the pressure table's displayed payment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mispay {
     pub expected_half_units: i32,
@@ -958,6 +956,10 @@ pub struct PressureTable {
     pub ghost: GhostSeat,
     pub mispay: Option<Mispay>,
     seed: u64,
+    rng: SmallRng,
+    ghost_return_chance: f64,
+    ghost_game: Option<Game>,
+    math: Option<PressurePrompt>,
 }
 
 impl PressureTable {
@@ -974,66 +976,152 @@ impl PressureTable {
             },
             mispay: None,
             seed,
+            rng: SmallRng::seed_from_u64(seed),
+            ghost_return_chance: 1.0 / 15.0,
+            ghost_game: None,
+            math: None,
         }
     }
 
     pub fn deal(&mut self) -> Result<(), GameError> {
+        if self.ghost.changed || self.mispay.is_some() || self.math.is_some() {
+            return Err(GameError::RoundInProgress);
+        }
+        let first_round = self.table.rounds == 0;
         self.table.deal()?;
-        self.ghost.changed = self.table.rounds > 0 && self.table.rounds.is_multiple_of(3);
-        if self.ghost.changed {
-            self.ghost.occupied = !self.ghost.occupied;
+        if !first_round {
+            self.ghost.changed = self.rng.random_bool(self.ghost_return_chance);
+            if self.ghost.changed {
+                self.ghost.occupied = !self.ghost.occupied;
+                self.ghost_return_chance = 1.0 / 15.0;
+            } else if !self.ghost.occupied {
+                self.ghost_return_chance = (self.ghost_return_chance + 0.2).min(0.9);
+            }
         }
         self.seed = self.seed.wrapping_add(1);
-        if !self.ghost.occupied {
-            self.ghost.situation = None;
-            self.ghost.action = None;
-            return Ok(());
-        }
-        let mut ghost_game = Game::new(self.seed);
-        ghost_game.deal()?;
-        self.ghost.situation = ghost_game.situation();
-        self.ghost.action = self.ghost.situation.map(|situation| {
-            if situation.kind == HandKind::Insurance {
-                Action::DeclineInsurance
-            } else {
-                strategy::recommendation(situation).action
+        self.ghost.situation = None;
+        self.ghost.action = None;
+        if self.ghost.occupied {
+            // The independent side table never changes the human shoe or count.
+            let mut game = self
+                .ghost_game
+                .take()
+                .unwrap_or_else(|| Game::new(self.seed));
+            game.deal()?;
+            let mut showed_unusual = false;
+            while let Some(mut situation) = game.situation() {
+                situation.can_surrender = false;
+                let basic = strategy::recommendation(situation).action;
+                let action = ghost_action(situation, self.rng.random_bool(0.3));
+                if !showed_unusual || action != basic {
+                    self.ghost.situation = Some(situation);
+                    self.ghost.action = Some(action);
+                }
+                showed_unusual |= action != basic;
+                game.act(action)?;
             }
-        });
+            self.ghost_game = Some(game);
+        } else {
+            self.ghost_game = None;
+        }
+        self.complete_round();
         Ok(())
     }
 
+    /// The fully played, independent ghost side table, not the human shoe.
+    pub fn ghost_game(&self) -> Option<&Game> {
+        self.ghost_game.as_ref()
+    }
+
     pub fn act_and_grade(&mut self, action: Action) -> Result<DrillFeedback, GameError> {
-        let feedback = self.table.act_and_grade(action)?;
-        if self.table.game.phase == Phase::Finished {
-            self.mispay = self
-                .table
-                .game
-                .result
-                .as_ref()
-                .filter(|result| self.table.rounds.is_multiple_of(5) && result.net_half_units != 0)
-                .map(|result| Mispay {
-                    expected_half_units: result.net_half_units,
-                    paid_half_units: result.net_half_units
-                        + if result.net_half_units > 0 { -1 } else { 1 },
-                });
+        if self.ghost.changed {
+            return Err(GameError::RoundInProgress);
         }
+        let feedback = self.table.act_and_grade(action)?;
+        self.complete_round();
         Ok(feedback)
     }
 
-    pub fn resolve_mispay(&mut self) {
-        self.mispay = None;
+    fn complete_round(&mut self) {
+        if let Some(result) = &self.table.game.result {
+            let expected = result.net_half_units;
+            let wrong = expected != 0 && self.rng.random_bool(1.0 / 20.0);
+            self.mispay = Some(Mispay {
+                expected_half_units: expected,
+                paid_half_units: expected + if wrong { -expected.signum() } else { 0 },
+            });
+            self.math = if !self.table.past_cut() && self.rng.random_bool(0.8) {
+                let left = self.rng.random_range(2..=9);
+                let right = self.rng.random_range(2..=9);
+                let operator = match self.rng.random_range(0..4) {
+                    0 => MathOperator::Add,
+                    1 => MathOperator::Subtract,
+                    2 => MathOperator::Multiply,
+                    _ => MathOperator::Divide,
+                };
+                Some(PressurePrompt::Math {
+                    left: if operator == MathOperator::Divide {
+                        left * right
+                    } else {
+                        left
+                    },
+                    right,
+                    operator,
+                })
+            } else {
+                None
+            };
+        }
     }
 
-    pub fn resolve_ghost_change(&mut self) {
-        self.ghost.changed = false;
+    /// Pending distractions are generated from domain state, not renderer scores.
+    pub fn pending_prompt(&self) -> Option<PressurePrompt> {
+        if self.table.finished {
+            return None;
+        }
+        if self.ghost.changed {
+            return Some(PressurePrompt::GhostChange {
+                occupied: self.ghost.occupied,
+            });
+        }
+        if self.table.pending_count || self.table.game.phase != Phase::Finished {
+            return None;
+        }
+        self.mispay
+            .map(|audit| PressurePrompt::Mispay {
+                dealer_mispayed: audit.expected_half_units != audit.paid_half_units,
+            })
+            .or(self.math)
+    }
+
+    /// Grades and consumes only the currently pending real event.
+    pub fn submit_pressure(&mut self, answer: i32) -> Option<(GradeBucket, bool)> {
+        let prompt = self.pending_prompt()?;
+        let correct = pressure_answer(prompt, answer);
+        let bucket = match prompt {
+            PressurePrompt::Mispay { .. } => {
+                self.mispay = None;
+                GradeBucket::Mispay
+            }
+            PressurePrompt::GhostChange { .. } => {
+                self.ghost.changed = false;
+                GradeBucket::Deviation
+            }
+            PressurePrompt::Math { .. } => {
+                self.math = None;
+                GradeBucket::Math
+            }
+            PressurePrompt::TimedDecision { .. } => GradeBucket::Timing,
+        };
+        Some((bucket, correct))
     }
 
     pub fn pending_count(&self) -> bool {
-        self.table.pending_count
+        self.table.pending_count && !self.ghost.changed
     }
 
     pub fn submit_count(&mut self, submitted: i32) -> bool {
-        self.table.submit_count(submitted)
+        !self.ghost.changed && self.table.submit_count(submitted)
     }
 
     pub fn expected_count(&self) -> i32 {
@@ -1045,6 +1133,35 @@ impl PressureTable {
     }
 }
 
+fn ghost_action(mut situation: Situation, unusual: bool) -> Action {
+    if situation.kind == HandKind::Insurance {
+        return Action::DeclineInsurance;
+    }
+    situation.can_surrender = false;
+    let basic = strategy::recommendation(situation).action;
+    if !unusual {
+        return basic;
+    }
+    let hard_total = match situation.kind {
+        HandKind::Hard => Some(situation.value),
+        HandKind::Pair if situation.value != 11 => Some(situation.value * 2),
+        _ => None,
+    };
+    if situation.can_split && !matches!(situation.value, 5 | 10) {
+        Action::Split
+    } else if situation.can_double && hard_total.is_some_and(|total| (9..=11).contains(&total)) {
+        Action::Double
+    } else if basic == Action::Hit
+        && (hard_total.is_some_and(|total| total >= 12)
+            || (situation.kind == HandKind::Soft && situation.value >= 17))
+    {
+        Action::Stand
+    } else {
+        basic
+    }
+}
+
+/// Exact assessment outcome; an early exit never constitutes a pass.
 pub struct AssessmentReport {
     pub shoes_completed: u8,
     pub attempts: u32,
@@ -1053,6 +1170,7 @@ pub struct AssessmentReport {
     pub early_exit: bool,
 }
 
+/// Three complete local shoes with locked five-round checks and exact final counts.
 #[derive(Debug, Clone)]
 pub struct AssessmentSession {
     pub table: TablePractice,
@@ -1065,7 +1183,8 @@ pub struct AssessmentSession {
 }
 
 impl AssessmentSession {
-    pub fn new(seed: u64, settings: ToolSettings) -> Self {
+    pub fn new(seed: u64, mut settings: ToolSettings) -> Self {
+        settings.count_every = Some(5);
         Self {
             table: TablePractice::new(seed, settings),
             shoes_completed: 0,
@@ -1077,9 +1196,27 @@ impl AssessmentSession {
         }
     }
 
-    pub fn record_answer(&mut self, correct: bool) {
+    fn record_answer(&mut self, correct: bool) {
         self.attempts = self.attempts.saturating_add(1);
         self.correct = self.correct.saturating_add(u32::from(correct));
+    }
+
+    /// Deals within the current shoe; completing a cut shoe is a separate intent.
+    pub fn deal(&mut self) -> Result<(), GameError> {
+        if self.early_exit || self.shoes_completed >= self.shoe_limit || self.table.past_cut() {
+            return Err(GameError::RoundInProgress);
+        }
+        self.table.deal()
+    }
+
+    /// Grades a pending periodic or final count exactly once.
+    pub fn submit_count(&mut self, submitted: i32) -> Option<bool> {
+        if self.early_exit || self.table.finished || !self.table.pending_count {
+            return None;
+        }
+        let correct = self.table.submit_count(submitted);
+        self.record_answer(correct);
+        Some(correct)
     }
     pub fn act_and_grade(&mut self, action: Action) -> Result<DrillFeedback, GameError> {
         let feedback = self.table.act_and_grade(action)?;
@@ -1089,7 +1226,9 @@ impl AssessmentSession {
 
     /// Completes a shoe only after the table has reached its cut card.
     pub fn finish_shoe(&mut self) -> bool {
-        if self.shoes_completed >= self.shoe_limit
+        if self.early_exit
+            || self.table.finished
+            || self.shoes_completed >= self.shoe_limit
             || self.table.pending_count
             || self.table.game.phase != Phase::Finished
             || !self.table.past_cut()
@@ -1099,13 +1238,17 @@ impl AssessmentSession {
         self.shoes_completed += 1;
         if self.shoes_completed < self.shoe_limit {
             self.seed = self.seed.wrapping_add(1);
-            self.table = TablePractice::new(self.seed, self.table.settings.clone());
+            self.table.game = Game::new(self.seed);
+            self.table.shoe_rounds = 0;
+        } else {
+            self.table.end();
         }
         true
     }
 
     pub fn exit_early(&mut self) {
         self.early_exit = true;
+        self.table.end();
     }
 
     pub fn report(&self) -> AssessmentReport {
@@ -1123,23 +1266,67 @@ impl AssessmentSession {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MathOperator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+
+impl MathOperator {
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Subtract => "−",
+            Self::Multiply => "×",
+            Self::Divide => "÷",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PressurePrompt {
-    Math { left: u8, right: u8 },
-    Mispay { dealer_mispayed: bool },
-    TimedDecision { limit_secs: u8, elapsed_secs: u8 },
-    GhostChange { occupied: bool },
+    Math {
+        left: u8,
+        right: u8,
+        operator: MathOperator,
+    },
+    Mispay {
+        dealer_mispayed: bool,
+    },
+    TimedDecision {
+        limit_secs: u8,
+        elapsed_secs: u8,
+    },
+    GhostChange {
+        occupied: bool,
+    },
 }
 
 pub fn math_answer(prompt: PressurePrompt) -> Option<i32> {
     match prompt {
-        PressurePrompt::Math { left, right } => Some(i32::from(left) + i32::from(right)),
+        PressurePrompt::Math {
+            left,
+            right,
+            operator,
+        } => {
+            let left = i32::from(left);
+            let right = i32::from(right);
+            match operator {
+                MathOperator::Add => Some(left + right),
+                MathOperator::Subtract => Some(left - right),
+                MathOperator::Multiply => Some(left * right),
+                MathOperator::Divide if right != 0 && left % right == 0 => Some(left / right),
+                MathOperator::Divide => None,
+            }
+        }
         _ => None,
     }
 }
 
 pub fn pressure_answer(prompt: PressurePrompt, answer: i32) -> bool {
     match prompt {
-        PressurePrompt::Math { left, right } => answer == i32::from(left) + i32::from(right),
+        PressurePrompt::Math { .. } => math_answer(prompt) == Some(answer),
         PressurePrompt::Mispay { dealer_mispayed } => answer == i32::from(dealer_mispayed),
         PressurePrompt::TimedDecision {
             limit_secs,
@@ -1152,64 +1339,45 @@ pub fn pressure_answer(prompt: PressurePrompt, answer: i32) -> bool {
 /// Build deterministic local card faces for a strategy situation.
 pub fn representative_cards(situation: Situation, card_count: u8) -> ([Card; 4], usize, Card) {
     let count = usize::from(card_count.clamp(2, 4));
-    let mut cards = [Card {
-        rank: Rank::Two,
-        suit: Suit::Hearts,
-    }; 4];
     let player_suits = [Suit::Hearts, Suit::Clubs, Suit::Diamonds, Suit::Spades];
+    let mut cards = std::array::from_fn(|index| Card {
+        rank: Rank::Two,
+        suit: player_suits[index],
+    });
     let dealer = Card {
         rank: rank_for_value(situation.dealer),
         suit: Suit::Diamonds,
     };
     match situation.kind {
         HandKind::Pair => {
-            let rank = rank_for_value(situation.value);
-            cards[0] = Card {
-                rank,
-                suit: player_suits[0],
-            };
-            cards[1] = Card {
-                rank,
-                suit: player_suits[1],
-            };
+            cards[0].rank = rank_for_value(situation.value);
+            cards[1].rank = cards[0].rank;
         }
         HandKind::Soft => {
-            cards[0] = Card {
-                rank: Rank::Ace,
-                suit: player_suits[0],
-            };
-            cards[1] = Card {
-                rank: rank_for_value(situation.value.saturating_sub(11).max(2)),
-                suit: player_suits[1],
-            };
-            for (index, suit) in player_suits.iter().enumerate().skip(2).take(count - 2) {
-                cards[index] = Card {
-                    rank: Rank::Two,
-                    suit: *suit,
+            cards[0].rank = Rank::Ace;
+            let mut remaining = situation.value.saturating_sub(10 + count as u8);
+            for card in &mut cards[1..count] {
+                let extra = remaining.min(9);
+                let value = 1 + extra;
+                card.rank = if value == 1 {
+                    Rank::Ace
+                } else {
+                    rank_for_value(value)
                 };
+                remaining -= extra;
             }
         }
-        HandKind::Hard | HandKind::Insurance => {
-            let first = if situation.kind == HandKind::Insurance {
-                10
-            } else {
-                situation.value.saturating_sub(2).min(10)
-            };
-            let second = situation.value.saturating_sub(first).clamp(2, 11);
-            cards[0] = Card {
-                rank: rank_for_value(first),
-                suit: player_suits[0],
-            };
-            cards[1] = Card {
-                rank: rank_for_value(second),
-                suit: player_suits[1],
-            };
-            for (index, suit) in player_suits.iter().enumerate().skip(2).take(count - 2) {
-                cards[index] = Card {
-                    rank: Rank::Two,
-                    suit: *suit,
-                };
+        HandKind::Hard => {
+            let mut remaining = situation.value.saturating_sub(2 * count as u8);
+            for card in &mut cards[..count] {
+                let extra = remaining.min(8);
+                card.rank = rank_for_value(2 + extra);
+                remaining -= extra;
             }
+        }
+        HandKind::Insurance => {
+            cards[0].rank = Rank::Ten;
+            cards[1].rank = Rank::Seven;
         }
     }
     (cards, count, dealer)
@@ -1248,6 +1416,100 @@ mod tests {
     use super::*;
 
     #[test]
+    fn running_count_reaches_the_final_prompt_before_the_shoe_can_shuffle() {
+        let mut drill = RunningCountDrill::new(7, None);
+        drill.start_round().unwrap();
+        for _ in 0..1000 {
+            drill.advance().unwrap();
+            if drill.checkpoint.final_count {
+                assert!(drill.checkpoint.prompt);
+                assert!(drill.current_game().remaining_cards() <= SUITE_CUT_CARD);
+                assert!(
+                    drill
+                        .submit_count(drill.running_count())
+                        .unwrap()
+                        .final_count
+                );
+                return;
+            }
+        }
+        panic!("one-shoe Running Count did not finish");
+    }
+
+    #[test]
+    fn strategy_catalog_cards_match_the_graded_total_family_and_legal_context() {
+        for scenario in basic_strategy_catalog(true) {
+            let (cards, count, dealer) =
+                representative_cards(scenario.situation, scenario.card_count);
+            let cards = &cards[..count];
+            let value = crate::model::hand_value(cards);
+            let pair = count == 2 && cards[0].rank.value() == cards[1].rank.value();
+            let kind = if pair {
+                HandKind::Pair
+            } else if value.soft {
+                HandKind::Soft
+            } else {
+                HandKind::Hard
+            };
+            assert_eq!(kind, scenario.situation.kind, "{scenario:?}");
+            assert_eq!(
+                if pair {
+                    cards[0].rank.value()
+                } else {
+                    value.total
+                },
+                scenario.situation.value,
+                "{scenario:?}"
+            );
+            assert!(value.total < 21, "settled hands have no decision");
+            assert_eq!(dealer.rank.value(), scenario.situation.dealer);
+            assert_eq!(scenario.situation.can_double, count == 2);
+            assert_eq!(scenario.situation.can_surrender, count == 2);
+            assert_eq!(scenario.situation.can_split, pair);
+            assert!(
+                scenario
+                    .situation
+                    .allows(strategy::recommendation(scenario.situation).action)
+            );
+        }
+    }
+
+    #[test]
+    fn index_drill_requires_the_strict_comparator_as_well_as_action_and_threshold() {
+        let mut drill = CoreIndexDrill::new(7);
+        let position = drill
+            .queue
+            .iter()
+            .position(|scenario| {
+                scenario.play.kind == HandKind::Hard
+                    && scenario.play.value == 13
+                    && scenario.play.dealer == 2
+            })
+            .unwrap();
+        drill.queue.swap(0, position);
+        let mut wrong_comparator = drill.clone();
+        let mut wrong_threshold = drill.clone();
+        assert!(
+            drill
+                .submit(Action::Hit, IndexComparison::Less, -1.0)
+                .unwrap()
+                .correct
+        );
+        assert!(
+            !wrong_comparator
+                .submit(Action::Hit, IndexComparison::GreaterOrEqual, -1.0)
+                .unwrap()
+                .correct
+        );
+        assert!(
+            !wrong_threshold
+                .submit(Action::Hit, IndexComparison::Less, 0.0)
+                .unwrap()
+                .correct
+        );
+    }
+
+    #[test]
     fn running_count_automatically_plays_the_round_before_prompting() {
         let mut drill = RunningCountDrill::new(7, Some(1));
         drill.start_round().unwrap();
@@ -1284,9 +1546,13 @@ mod tests {
             let mut saw_dealer_hit = false;
             for _ in 0..100 {
                 let game = drill.current_game();
-                if game.phase == Phase::Playing {
-                    saw_player_hit |= game.hands.iter().any(|hand| hand.cards.len() > 2);
-                    saw_dealer_hit |= game.dealer.len() > 2;
+                saw_player_hit |= game.hands.iter().any(|hand| hand.cards.len() > 2);
+                if game.dealer.len() > 2 {
+                    saw_dealer_hit = true;
+                    assert!(
+                        !drill.hole_hidden(),
+                        "dealer hits must follow a visible hole reveal"
+                    );
                 }
                 if drill.checkpoint.prompt {
                     break;
@@ -1370,33 +1636,6 @@ mod tests {
     }
 
     #[test]
-    fn every_shipped_index_matches_at_threshold_and_falls_back_below() {
-        for play in strategy::core_index_plays() {
-            let situation = Situation {
-                kind: play.kind,
-                value: play.value,
-                dealer: play.dealer,
-                can_double: true,
-                can_split: play.kind == HandKind::Pair,
-                can_surrender: play.surrender_only,
-                split_aces: false,
-            };
-            let (_, at_source) = strategy::graded_action(
-                situation,
-                Some(play.threshold),
-                strategy::core_index_plays(),
-            );
-            assert_eq!(at_source, StrategySource::CoreIndex, "{play:?}");
-            let (_, below_source) = strategy::graded_action(
-                situation,
-                Some(play.threshold - 0.01),
-                strategy::core_index_plays(),
-            );
-            assert_eq!(below_source, StrategySource::BasicStrategy, "{play:?}");
-        }
-    }
-
-    #[test]
     fn insurance_index_is_legal_and_basic_strategy_falls_back_below_threshold() {
         let situation = Situation {
             kind: HandKind::Insurance,
@@ -1419,15 +1658,6 @@ mod tests {
     }
 
     #[test]
-    fn true_count_accepts_only_documented_alternate() {
-        let mut drill = TrueCountDrill::new(42, 2, false, 90).unwrap();
-        let expected = drill.answer();
-        let feedback = drill.submit(expected);
-        assert!(feedback.correct);
-        assert_eq!(drill.info().cards, drill.cards.len());
-    }
-
-    #[test]
     fn true_count_rejects_unsupported_inputs_and_rotates_tray_angle() {
         assert!(matches!(
             TrueCountDrill::new(42, 0, false, 90),
@@ -1445,80 +1675,354 @@ mod tests {
         assert_eq!(drill.angle, 0);
     }
 
+    fn natural_seed() -> u64 {
+        (0..4096)
+            .find(|seed| {
+                let mut game = Game::new(*seed);
+                game.deal().unwrap();
+                game.phase == Phase::Finished
+            })
+            .expect("seed range contains an immediately settled natural")
+    }
+
+    fn table_action(table: &TablePractice) -> Action {
+        let situation = table.game.situation().unwrap();
+        let count = truncated_true_count(
+            table.game.running_count(),
+            6,
+            table.game.discarded_count(),
+            table.settings.half_deck,
+        );
+        strategy::graded_action(situation, Some(count as f32), strategy::core_index_plays())
+            .0
+            .action
+    }
+
     #[test]
-    fn pressure_table_exposes_ghost_state_from_a_real_deal() {
-        let mut table = PressureTable::new(11, ToolSettings::default());
+    fn table_natural_deal_counts_the_round_and_blocks_dealing_until_checked() {
+        let mut table = TablePractice::new(natural_seed(), ToolSettings::default());
         table.deal().unwrap();
-        assert!(table.ghost.occupied);
-        assert!(table.ghost.situation.is_some());
-        assert!(table.ghost.action.is_some());
-        assert_eq!(table.table.game.phase, Phase::Playing);
+        assert_eq!(table.game.phase, Phase::Finished);
+        assert_eq!(table.rounds, 1);
+        assert!(table.pending_count);
+        let count = table.expected_count();
+        assert_eq!(table.deal(), Err(GameError::RoundInProgress));
+        assert_eq!(table.expected_count(), count);
+        assert!(table.submit_count(count));
+        assert!(!table.submit_count(count));
+        table.deal().unwrap();
     }
 
     #[test]
-    fn pressure_table_generates_a_payout_audit_from_settlement() {
-        let mut table = PressureTable::new(11, ToolSettings::default());
-        let mut found = false;
-        for _ in 0..20 {
-            table.deal().unwrap();
-            while let Some(situation) = table.table.game.situation() {
-                let action = if situation.kind == HandKind::Insurance {
-                    Action::DeclineInsurance
-                } else {
-                    Action::Stand
-                };
-                table.act_and_grade(action).unwrap();
-            }
-            if table.mispay.is_some() {
-                found = true;
-                break;
-            }
-            if table.pending_count() {
-                let expected = table.expected_count();
-                assert!(table.submit_count(expected));
-            }
-        }
-        assert!(found);
-    }
-
-    fn complete_assessment_shoe(session: &mut AssessmentSession) {
-        loop {
-            if session.table.pending_count {
-                let expected = session.table.expected_count();
-                assert!(session.table.submit_count(expected));
-                continue;
-            }
-            if matches!(session.table.game.phase, Phase::Ready | Phase::Finished) {
-                if session.table.past_cut() {
+    fn table_requires_a_final_count_before_game_auto_shuffle() {
+        for interval in [None, Some(usize::MAX)] {
+            let settings = ToolSettings {
+                count_every: interval,
+                ..ToolSettings::default()
+            };
+            let mut table = TablePractice::new(11, settings);
+            let mut reached_cut = false;
+            for _ in 0..100 {
+                table.deal().unwrap();
+                while table.game.situation().is_some() {
+                    table.act(table_action(&table)).unwrap();
+                }
+                if table.past_cut() {
+                    reached_cut = true;
+                    assert!(table.pending_count);
+                    let count = table.expected_count();
+                    assert_eq!(table.deal(), Err(GameError::RoundInProgress));
+                    assert_eq!(table.expected_count(), count);
+                    assert!(table.submit_count(count));
+                    let rounds = table.rounds;
+                    table.deal().unwrap();
+                    assert!(table.game.remaining_cards() > 200);
+                    assert!(table.rounds >= rounds);
                     break;
                 }
-                session.table.deal().unwrap();
-                continue;
+                assert!(!table.pending_count);
             }
-            let situation = session.table.game.situation().unwrap();
-            let action = if situation.kind == HandKind::Insurance {
-                Action::DeclineInsurance
-            } else {
-                Action::Stand
-            };
-            session.table.act(action).unwrap();
+            assert!(reached_cut, "the final count must precede the next shuffle");
+            assert!(table.rounds > 1);
         }
+    }
+
+    #[test]
+    fn ended_table_rejects_actions_without_consuming_cards_or_checks() {
+        let mut table = TablePractice::new(11, ToolSettings::default());
+        table.deal().unwrap();
+        let action = table_action(&table);
+        let remaining = table.game.remaining_cards();
+        table.end();
+        assert_eq!(table.act(action), Err(GameError::RoundInProgress));
+        assert_eq!(table.game.remaining_cards(), remaining);
+        assert_eq!(table.deal(), Err(GameError::RoundInProgress));
+    }
+
+    #[test]
+    fn table_accepts_a_play_supported_only_by_the_quarter_deck_estimate() {
+        for seed in 0..256 {
+            let mut table = TablePractice::new(seed, ToolSettings::default());
+            for _ in 0..100 {
+                table.deal().unwrap();
+                while let Some(situation) = table.game.situation() {
+                    let primary = table_action(&table);
+                    if let Some(count) = quarter_deck_alternate(
+                        6,
+                        table.game.discarded_count(),
+                        table.game.running_count(),
+                        table.settings.half_deck,
+                    ) {
+                        let alternate = strategy::graded_action(
+                            situation,
+                            Some(count as f32),
+                            strategy::core_index_plays(),
+                        )
+                        .0
+                        .action;
+                        if alternate != primary {
+                            let feedback = table.act_and_grade(alternate).unwrap();
+                            assert!(feedback.correct);
+                            assert_eq!(feedback.expected, alternate);
+                            return;
+                        }
+                    }
+                    table.act(primary).unwrap();
+                }
+                if table.past_cut() {
+                    break;
+                }
+                if table.pending_count {
+                    assert!(table.submit_count(table.expected_count()));
+                }
+            }
+        }
+        panic!("seed range must contain an actual table index boundary");
+    }
+
+    fn settle_pressure_round(table: &mut PressureTable) {
+        if table.ghost.changed {
+            let answer = i32::from(table.ghost.occupied);
+            assert_eq!(
+                table.submit_pressure(answer),
+                Some((GradeBucket::Deviation, true))
+            );
+        }
+        while table.table.game.situation().is_some() {
+            let action = table_action(&table.table);
+            table.act_and_grade(action).unwrap();
+        }
+        if table.pending_count() {
+            assert!(table.submit_count(table.expected_count()));
+        }
+    }
+
+    #[test]
+    fn pressure_natural_deal_produces_a_real_payout_audit_after_the_count() {
+        let mut table = PressureTable::new(natural_seed(), ToolSettings::default());
+        table.deal().unwrap();
+        assert_eq!(table.table.rounds, 1);
+        let audit = table.mispay.unwrap();
+        assert_eq!(
+            audit.expected_half_units,
+            table.table.game.result.as_ref().unwrap().net_half_units
+        );
+        assert!(table.pending_prompt().is_none());
+        assert!(table.submit_count(table.expected_count()));
+        let expected = i32::from(audit.expected_half_units != audit.paid_half_units);
+        assert_eq!(table.deal(), Err(GameError::RoundInProgress));
+        assert_eq!(
+            table.submit_pressure(1 - expected),
+            Some((GradeBucket::Mispay, false))
+        );
+        assert!(table.mispay.is_none());
+    }
+
+    #[test]
+    fn pressure_events_are_resolved_once_and_include_correct_and_incorrect_payouts() {
+        let mut table = PressureTable::new(11, ToolSettings::default());
+        let mut saw_correct_payout = false;
+        let mut saw_mispay = false;
+        let mut operators = [false; 4];
+        for _ in 0..100 {
+            table.deal().unwrap();
+            settle_pressure_round(&mut table);
+            let audit = table.mispay.unwrap();
+            let wrong = audit.expected_half_units != audit.paid_half_units;
+            saw_mispay |= wrong;
+            saw_correct_payout |= !wrong;
+            assert_eq!(
+                table.submit_pressure(i32::from(wrong)),
+                Some((GradeBucket::Mispay, true))
+            );
+            while let Some(prompt) = table.pending_prompt() {
+                let answer = match prompt {
+                    PressurePrompt::Math { operator, .. } => {
+                        operators[match operator {
+                            MathOperator::Add => 0,
+                            MathOperator::Subtract => 1,
+                            MathOperator::Multiply => 2,
+                            MathOperator::Divide => 3,
+                        }] = true;
+                        math_answer(prompt).unwrap()
+                    }
+                    PressurePrompt::GhostChange { occupied } => i32::from(occupied),
+                    _ => panic!("payout audit should already be resolved"),
+                };
+                assert!(table.submit_pressure(answer).unwrap().1);
+            }
+            assert_eq!(table.submit_pressure(0), None);
+            if saw_correct_payout && saw_mispay && operators.iter().all(|seen| *seen) {
+                return;
+            }
+        }
+        panic!("deterministic rounds did not exercise all pressure events");
+    }
+
+    #[test]
+    fn pressure_ghost_side_table_plays_legally_and_can_leave_and_return() {
+        let mut table = PressureTable::new(11, ToolSettings::default());
+        let mut saw_empty = false;
+        let mut saw_return = false;
+        let mut saw_unusual = false;
+        for _ in 0..200 {
+            table.deal().unwrap();
+            if let Some(game) = table.ghost_game() {
+                assert!(table.ghost.occupied);
+                assert_eq!(game.phase, Phase::Finished);
+                assert!(game.result.is_some());
+                assert!(
+                    game.hands
+                        .iter()
+                        .all(|hand| hand.status == HandStatus::Settled)
+                );
+            } else {
+                assert!(!table.ghost.occupied);
+                saw_empty = true;
+            }
+            if let (Some(situation), Some(action)) = (table.ghost.situation, table.ghost.action) {
+                assert!(situation.allows(action));
+                assert_ne!(action, Action::Surrender);
+                assert_ne!(action, Action::Insure);
+                saw_unusual |= action != strategy::recommendation(situation).action;
+            }
+            saw_return |= saw_empty && table.ghost.occupied;
+            if table.ghost.changed {
+                let remaining = table.table.game.remaining_cards();
+                assert_eq!(table.deal(), Err(GameError::RoundInProgress));
+                assert_eq!(table.table.game.remaining_cards(), remaining);
+            }
+            settle_pressure_round(&mut table);
+            while let Some(prompt) = table.pending_prompt() {
+                let answer = match prompt {
+                    PressurePrompt::Mispay { dealer_mispayed } => i32::from(dealer_mispayed),
+                    PressurePrompt::Math { .. } => math_answer(prompt).unwrap(),
+                    _ => panic!("ghost change should be resolved before player acts"),
+                };
+                assert!(table.submit_pressure(answer).unwrap().1);
+            }
+            if saw_return && saw_unusual {
+                return;
+            }
+        }
+        panic!("seeded ghost side table must leave, return, and make unusual plays");
+    }
+
+    #[test]
+    fn assessment_locks_five_round_checks_and_cannot_grade_them_twice() {
+        let mut session = AssessmentSession::new(
+            11,
+            ToolSettings {
+                count_every: None,
+                ..ToolSettings::default()
+            },
+        );
+        for round in 1..=5 {
+            session.deal().unwrap();
+            while session.table.game.situation().is_some() {
+                let action = table_action(&session.table);
+                session.act_and_grade(action).unwrap();
+            }
+            assert_eq!(session.table.rounds, round);
+            assert_eq!(session.table.pending_count, round == 5);
+        }
+        let count = session.table.expected_count();
+        let attempts = session.attempts;
+        assert!(session.deal().is_err());
+        assert_eq!(session.submit_count(count), Some(true));
+        assert_eq!(session.submit_count(count), None);
+        assert_eq!(session.attempts, attempts + 1);
+    }
+
+    fn complete_assessment_shoe(session: &mut AssessmentSession, miss_final_count: bool) {
+        let mut reached_cut = false;
+        for _ in 0..1000 {
+            if session.table.pending_count {
+                let final_count = session.table.past_cut();
+                let expected = session.table.expected_count();
+                assert!(!session.finish_shoe());
+                let correct = session
+                    .submit_count(expected + i32::from(final_count && miss_final_count))
+                    .unwrap();
+                assert_eq!(correct, !(final_count && miss_final_count));
+                if final_count {
+                    reached_cut = true;
+                    break;
+                }
+            } else if session.table.game.situation().is_some() {
+                let action = table_action(&session.table);
+                assert!(session.act_and_grade(action).unwrap().correct);
+            } else {
+                session.deal().unwrap();
+            }
+        }
+        assert!(reached_cut, "shoe must finish with a checked final count");
         assert!(session.finish_shoe());
     }
 
     #[test]
     fn assessment_requires_three_complete_shoes_and_zero_misses() {
         let mut session = AssessmentSession::new(1, ToolSettings::default());
+        assert_eq!(session.table.settings.count_every, Some(5));
         assert!(!session.finish_shoe());
-        session.record_answer(true);
-        complete_assessment_shoe(&mut session);
-        complete_assessment_shoe(&mut session);
+        complete_assessment_shoe(&mut session, false);
+        let rounds = session.table.rounds;
+        let attempts = session.attempts;
+        complete_assessment_shoe(&mut session, false);
+        assert!(session.table.rounds > rounds);
+        assert!(session.attempts > attempts);
         assert!(!session.report().passed);
-        complete_assessment_shoe(&mut session);
-        assert!(session.report().passed);
+        complete_assessment_shoe(&mut session, false);
+        let report = session.report();
+        assert!(report.passed);
+        assert_eq!(report.shoes_completed, 3);
+        assert_eq!(report.attempts, report.correct);
+        assert!(report.attempts > 3);
+        assert!(!session.finish_shoe());
+        assert!(session.deal().is_err());
+        assert_eq!(session.submit_count(0), None);
+    }
 
-        session.exit_early();
-        assert!(!session.report().passed);
+    #[test]
+    fn assessment_final_count_miss_and_early_exit_cannot_pass() {
+        let mut session = AssessmentSession::new(1, ToolSettings::default());
+        complete_assessment_shoe(&mut session, false);
+        complete_assessment_shoe(&mut session, false);
+        complete_assessment_shoe(&mut session, true);
+        let report = session.report();
+        assert!(!report.passed);
+        assert_eq!(report.correct + 1, report.attempts);
+
+        let mut exited = AssessmentSession::new(11, ToolSettings::default());
+        exited.deal().unwrap();
+        exited.exit_early();
+        assert!(exited.report().early_exit);
+        assert!(!exited.report().passed);
+        assert!(exited.deal().is_err());
+        assert!(exited.act_and_grade(Action::Stand).is_err());
+        assert!(!exited.finish_shoe());
+        assert_eq!(exited.submit_count(0), None);
+        assert_eq!(exited.report().attempts, 0);
     }
     #[test]
     fn current_stats_reset_without_losing_lifetime() {
@@ -1537,16 +2041,43 @@ mod tests {
 
     #[test]
     fn pressure_prompts_have_real_grading() {
-        let prompt = PressurePrompt::Math { left: 7, right: 8 };
-        assert_eq!(math_answer(prompt), Some(15));
-        assert!(pressure_answer(prompt, 15));
-        assert!(!pressure_answer(prompt, 14));
+        for (operator, left, right, expected) in [
+            (MathOperator::Add, 7, 8, 15),
+            (MathOperator::Subtract, 2, 9, -7),
+            (MathOperator::Multiply, 7, 8, 56),
+            (MathOperator::Divide, 56, 8, 7),
+        ] {
+            let prompt = PressurePrompt::Math {
+                left,
+                right,
+                operator,
+            };
+            assert_eq!(math_answer(prompt), Some(expected));
+            assert!(pressure_answer(prompt, expected));
+            assert!(!pressure_answer(prompt, expected + 1));
+        }
+        for (left, right) in [(7, 2), (8, 0)] {
+            let prompt = PressurePrompt::Math {
+                left,
+                right,
+                operator: MathOperator::Divide,
+            };
+            assert_eq!(math_answer(prompt), None);
+            assert!(!pressure_answer(prompt, 0));
+        }
         assert!(pressure_answer(
             PressurePrompt::TimedDecision {
                 limit_secs: 5,
                 elapsed_secs: 5,
             },
             0
+        ));
+        assert!(!pressure_answer(
+            PressurePrompt::TimedDecision {
+                limit_secs: 5,
+                elapsed_secs: 6,
+            },
+            1
         ));
     }
 }

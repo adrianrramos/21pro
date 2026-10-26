@@ -274,13 +274,14 @@ References: [Microsoft WSL GUI support](https://learn.microsoft.com/en-us/window
 
 The **Training Suite** is a separate top-level tab for offline counting and decision practice. It uses the current H17, DAS, late-surrender ruleset and keeps suite attempts out of the existing table heatmap and 250-round baseline.
 
-- **Running Count:** exact Hi-Lo checks; a face-down hole card is excluded until reveal.
+- **Running Count:** automatic Hi-Lo rounds, interval checks, and a final count before shuffle; the hole card joins the count when revealed.
 - **True Count:** discard-tray estimates with stepped whole- or half-deck divisors, truncation toward zero, and the documented quarter-deck alternate.
-- **Basic Strategy:** generated hard, soft, pair, and multi-card situations graded by the local strategy function.
-- **Core Index Plays:** project-owned Illustrious 18 plus Fab 4 threshold practice, including insurance and strict comparator support.
+- **Basic Strategy:** actionable hard, soft, pair, and multi-card hands whose visible cards match the graded situation; feedback stays with the answered hand.
+- **Core Index Plays:** the locally normalized Illustrious 18 plus Fab 4; answer the action, comparator, and threshold, including insurance and strict low-side rules.
 - **Table Practice:** self-paced table play with suite-only count checkpoints.
-- **Assessment:** a local three-shoe session that passes only with zero misses.
-- **Pressure Table:** table play with local math, timing, mispay, and ghost-change prompts.
+- **Assessment:** three complete shoes, locked five-round/final counts, and an exact-perfect pass requirement; early exit is not a pass.
+- **Pressure Table:** graded payout audits, arithmetic, timed decisions, and a separately dealt ghost side table that is excluded from your count.
+- **Training Stats:** current and lifetime accuracy, streaks, time, and mistake buckets; resetting current stats preserves lifetime progress.
 
 Training Suite settings, summaries, streaks, elapsed time, and mistake buckets are stored in the player profile. Existing profile data migrates without resetting rounds, decisions, reviews, or card-counting history. Index provenance and the selected ruleset are documented in [`docs/training-suite.md`](docs/training-suite.md).
 

@@ -298,7 +298,11 @@ fn cards_with_slide(
         paint_card(
             ui,
             egui::Rect::from_min_size(
-                start + vec2((1.0 - card_progress) * card_size.x * 1.1, 0.0),
+                start
+                    + vec2(
+                        index as f32 * step + (1.0 - card_progress) * card_size.x * 1.1,
+                        0.0,
+                    ),
                 card_size,
             ),
             card,
@@ -336,34 +340,63 @@ pub fn suite_table(
         });
 }
 
-pub fn discard_tray(ui: &mut egui::Ui, cards: &[Card], angle: u8) {
+pub fn discard_tray(ui: &mut egui::Ui, cards: &[Card], angle: u8, decks: usize) {
     panel().inner_margin(12).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            eyebrow(ui, "DISCARD TRAY");
-            muted(ui, format!("{} cards · angle {}", cards.len(), angle + 1));
+        eyebrow(ui, "DISCARD TRAY");
+        muted(
+            ui,
+            format!("Viewing angle {} · each notch is one deck", angle + 1),
+        );
+        let card_size = vec2(78.0, 110.0);
+        let card_depth = 0.42;
+        let shoe_height = decks as f32 * 52.0 * card_depth;
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(ui.available_width(), card_size.y + shoe_height + 20.0),
+            Sense::hover(),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Image,
+                true,
+                format!(
+                    "Discard tray: {} cards from {} decks; angle {}",
+                    cards.len(),
+                    decks,
+                    angle + 1
+                ),
+            )
         });
-        let window = cards.len().min(6);
-        let start = match angle {
-            0 => cards.len().saturating_sub(window),
-            1 => cards.len().saturating_sub(window + 4) / 2,
-            _ => 0,
-        };
-        ui.horizontal(|ui| {
-            for card in cards.iter().skip(start).take(window) {
-                let (rect, response) = ui.allocate_exact_size(vec2(42.0, 60.0), Sense::hover());
-                response.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::WidgetType::Image,
-                        true,
-                        format!("{:?} of {:?}", card.rank, card.suit),
-                    )
-                });
-                paint_card(ui, rect, Some(*card));
-            }
-            if cards.is_empty() {
-                muted(ui, "No exposed cards yet");
-            }
-        });
+        let base = pos2(
+            rect.center().x - card_size.x / 2.0,
+            rect.bottom() - card_size.y - 5.0,
+        );
+        let skew = [-14.0, 0.0, 14.0][usize::from(angle.min(2))];
+        for deck in 0..=decks {
+            let y = rect.bottom() - 5.0 - deck as f32 * 52.0 * card_depth;
+            ui.painter().line_segment(
+                [
+                    pos2(base.x + card_size.x + 24.0, y),
+                    pos2(base.x + card_size.x + 36.0, y),
+                ],
+                Stroke::new(1.0, MUTED),
+            );
+        }
+        let mut top = egui::Rect::from_min_size(base, card_size);
+        for index in 0..cards.len() {
+            let depth = index as f32 * card_depth;
+            top = egui::Rect::from_min_size(
+                base + vec2(skew * depth / shoe_height, -depth),
+                card_size,
+            );
+            ui.painter().rect_filled(top, 3.0, Color32::from_gray(218));
+            ui.painter()
+                .rect_stroke(top, 3.0, Stroke::new(0.5, BORDER), egui::StrokeKind::Inside);
+        }
+        if let Some(card) = cards.last() {
+            paint_card(ui, top, Some(*card));
+        } else {
+            muted(ui, "No discarded cards yet");
+        }
     });
 }
 
@@ -729,6 +762,75 @@ pub fn category_bars(ui: &mut egui::Ui, analytics: &Analytics) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn card_paint_keeps_centered_slots_during_slide_and_hides_only_the_hole() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let cards = [
+            Card {
+                rank: Rank::Ace,
+                suit: Suit::Diamonds,
+            },
+            Card {
+                rank: Rank::Two,
+                suit: Suit::Diamonds,
+            },
+            Card {
+                rank: Rank::Eight,
+                suit: Suit::Diamonds,
+            },
+        ];
+        let size = vec2(52.0, 74.0);
+        let render = |progress, hide_hole, count, available_width| {
+            let mut center = 0.0;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.set_width(available_width);
+                center = ui.available_rect_before_wrap().center().x;
+                cards_with_slide(ui, &cards[..count], hide_hole, size, progress);
+            });
+            output.textures_delta.clear();
+            let painted: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| {
+                    if let egui::Shape::Rect(rect) = &clipped.shape
+                        && rect.rect.size() == size
+                    {
+                        Some((rect.rect, clipped.shape.texture_id()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(painted.len(), count);
+            (center, painted)
+        };
+        for (count, available_width, step) in [(3, 400.0, 46.8), (3, 100.0, 24.0), (2, 400.0, 46.8)]
+        {
+            let (center, settled) = render(1.0, false, count, available_width);
+            let start = center - (52.0 + step * (count - 1) as f32) / 2.0;
+            for (index, (rect, _)) in settled.iter().enumerate() {
+                assert!((rect.left() - (start + index as f32 * step)).abs() <= 0.5);
+            }
+            let (_, sliding) = render(0.5, false, count, available_width);
+            for (index, (rect, _)) in sliding.iter().enumerate() {
+                let stagger = index as f32 * 0.08;
+                let progress = (0.5 - stagger) / (1.0 - stagger);
+                let expected = start + index as f32 * step + (1.0 - progress) * 57.2;
+                assert!((rect.left() - expected).abs() <= 0.5);
+            }
+            let (_, hidden) = render(1.0, true, count, available_width);
+            for index in 0..count {
+                assert_eq!(hidden[index].0, settled[index].0);
+            }
+            assert_eq!(hidden[0].1, settled[0].1);
+            assert_ne!(hidden[1].1, settled[1].1);
+            if count == 3 {
+                assert_eq!(hidden[1].1, hidden[2].1);
+            }
+        }
+    }
 
     #[test]
     fn bundled_card_assets_load_as_svg_images() {

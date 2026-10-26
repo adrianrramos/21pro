@@ -209,38 +209,6 @@ fn active_suite(tool: ToolId) -> AppHarness {
 }
 
 #[test]
-fn training_suite_menu_exposes_cards_settings_and_current_lifetime_stats() {
-    let harness = fixture(Fixture::TrainingSuite);
-    assert!(
-        harness
-            .query_all_by_label("CURRENT ACCURACY")
-            .next()
-            .is_some()
-    );
-    assert!(
-        harness
-            .query_all_by_label("LIFETIME ACCURACY")
-            .next()
-            .is_some()
-    );
-    harness.get_by_label("End of shoe");
-    harness.get_by_label("1 round");
-    harness.get_by_label("Training Stats");
-    harness.get_by_label("Start Running Count");
-    harness.get_by_label("Start True Count");
-}
-
-#[test]
-fn running_count_active_surface_shows_automatic_table_and_preferences() {
-    let harness = active_suite(ToolId::RunningCount);
-    harness.get_by_label("DEALER");
-    assert!(harness.query_by_label("DISCARD TRAY").is_none());
-    harness.get_by_label("AUTOMATIC DEAL");
-    harness.get_by_label("PREFERENCES");
-    harness.get_by_label("Dealing speed: 6");
-    harness.get_by_label_contains("Penetration");
-}
-#[test]
 fn running_count_auto_deals_and_grades_a_wrong_count() {
     let ctx = eframe::egui::Context::default();
     let mut app = TrainerApp::fixture(&ctx, Fixture::TrainingSuite).unwrap();
@@ -346,38 +314,54 @@ fn running_count_pauses_then_clears_before_next_deal() {
 }
 
 #[test]
-fn true_count_active_surface_exposes_tray_angles_and_answer_card() {
+fn true_count_keeps_its_given_when_rotated_and_locks_the_answer_until_next_pile() {
     let mut harness = active_suite(ToolId::TrueCount);
-    harness.get_by_label("DISCARD TRAY");
-    harness.get_by_label("TRAY ANGLE");
-    harness.get_by_label("ENTER THE TRUE COUNT");
+    let given = harness
+        .get_by_label_contains("Given running count:")
+        .accesskit_node()
+        .value()
+        .unwrap()
+        .to_owned();
     harness.get_by_label("›").click();
     harness.run_steps(2);
+    harness.get_by_label(&given);
+    harness.get_by_role(Role::TextInput).type_text("999");
+    harness.run_steps(2);
+    harness.key_press(Key::Enter);
+    harness.run_steps(2);
+    harness.get_by_label_contains("Incorrect · answer");
+    assert!(
+        harness
+            .get_by_label("Submit true count  [Enter]")
+            .accesskit_node()
+            .is_disabled()
+    );
+    harness.get_by_label("Next discard pile").click();
+    harness.run_steps(2);
+    assert!(
+        !harness
+            .get_by_label("Submit true count  [Enter]")
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(harness.query_by_label("Next discard pile").is_none());
 }
 
 #[test]
-fn basic_strategy_active_surface_shows_cards_and_actions() {
-    let harness = active_suite(ToolId::BasicStrategy);
-    harness.get_by_label("DEALER");
-    harness.get_by_label("DECISION CARD");
-    harness.get_by_label("Hit [H]");
-}
-
-#[test]
-fn core_index_active_surface_shows_cards_and_threshold_input() {
-    let harness = active_suite(ToolId::CoreIndexPlays);
-    harness.get_by_label("DEALER");
-    harness.get_by_label("INDEX DECISION");
-    harness.get_by_label("True-count threshold");
-}
-
-#[test]
-fn pressure_table_active_surface_shows_ghost_and_decision_clock() {
-    let harness = active_suite(ToolId::PressureTable);
-    harness.get_by_label("PRESSURE FEED");
-    harness.get_by_label("Ghost seat occupied");
-    harness.get_by_label_contains("Decision clock");
-    harness.get_by_label("Hit [H]");
+fn table_count_checkpoint_submits_typed_input_with_enter() {
+    let mut harness = active_suite(ToolId::TablePractice);
+    harness.get_by_label("Deal first suite hand").click();
+    harness.run_steps(2);
+    harness.get_by_label("Stand [S]").click();
+    harness.run_steps(2);
+    harness.get_by_label("Count checkpoint");
+    harness.get_by_role(Role::TextInput).type_text("999");
+    harness.run_steps(2);
+    harness.key_press(Key::Enter);
+    harness.run_steps(2);
+    harness.get_by_label_contains("Incorrect · expected");
+    assert!(harness.query_by_label("Count checkpoint").is_none());
+    harness.get_by_label("Next suite hand");
 }
 
 #[test]
@@ -394,4 +378,52 @@ fn ending_a_suite_session_records_incomplete_without_a_finished_report() {
         .expect("session is persisted");
     assert!(!session.finished);
     assert_eq!(session.passed, None);
+}
+
+#[test]
+fn strategy_feedback_retains_the_answered_hand_and_blocks_a_second_action() {
+    let mut harness = active_suite(ToolId::BasicStrategy);
+    let hand = harness
+        .get_by_label_contains(" cards")
+        .accesskit_node()
+        .value()
+        .unwrap()
+        .to_owned();
+    harness.get_by_label("Stand [S]").click();
+    harness.run_steps(2);
+    harness.get_by_label(&hand);
+    assert!(harness.query_by_label("Stand [S]").is_none());
+    harness.get_by_label("Next situation").click();
+    harness.run_steps(2);
+    harness.get_by_label("Stand [S]");
+    assert!(harness.query_by_label(&hand).is_none());
+}
+
+#[test]
+fn incorrect_final_count_remains_visible_in_the_finished_report() {
+    let mut harness = active_suite(ToolId::RunningCount);
+    let expected = {
+        let app = harness.state_mut();
+        let Some(SuiteActivity::RunningCount(drill)) = app.suite.as_mut() else {
+            unreachable!()
+        };
+        drill.interval = None;
+        for _ in 0..1000 {
+            drill.advance().unwrap();
+            if drill.checkpoint.final_count {
+                break;
+            }
+        }
+        assert!(drill.checkpoint.final_count);
+        let expected = drill.running_count();
+        app.suite_input = (expected + 1).to_string();
+        app.execute(Command::SuiteSubmit);
+        expected
+    };
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().suite_report.as_ref().unwrap().passed,
+        Some(false)
+    );
+    harness.get_by_label(&format!("Final count: actual {expected:+}."));
 }

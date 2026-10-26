@@ -384,6 +384,40 @@ mod tests {
     }
 
     #[test]
+    fn schema_two_without_suite_fields_preserves_history_and_saves_suite_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.redb");
+        let store = Store::open(&path).unwrap();
+        let mut legacy = Profile::default();
+        legacy.record_round(42, 3);
+        legacy.record_attempt(situation(), Action::Stand, 100, StudyMode::Table);
+        legacy.record_counting_trial(120, 2345);
+        let mut snapshot = serde_json::to_value(legacy).unwrap();
+        snapshot["schema_version"] = serde_json::json!(2);
+        for field in ["suite_settings", "suite_stats", "suite_sessions"] {
+            snapshot.as_object_mut().unwrap().remove(field);
+        }
+        raw_snapshot(&store, &serde_json::to_vec(&snapshot).unwrap());
+        let mut migrated = store.load().unwrap();
+        assert_eq!(migrated.schema_version, SCHEMA_VERSION);
+        let value = serde_json::to_value(&migrated).unwrap();
+        for field in ["rounds", "attempts", "reviews", "counting_history"] {
+            assert_eq!(value[field], snapshot[field], "{field}");
+        }
+        assert_eq!(migrated.suite_stats.attempts, 0);
+        migrated.suite_settings.true_count_decks = 4;
+        migrated.suite_settings.half_deck = true;
+        migrated.record_suite_attempt(GradeBucket::Count, false);
+        store.save(&migrated).unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap().load().unwrap();
+        assert_eq!(
+            serde_json::to_value(reopened).unwrap(),
+            serde_json::to_value(migrated).unwrap()
+        );
+    }
+
+    #[test]
     fn negative_counting_completion_is_corruption() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("profile.redb")).unwrap();

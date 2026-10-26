@@ -52,7 +52,8 @@ pub const fn core_index_plays() -> &'static [IndexPlay] {
     &CORE_INDEX_PLAYS
 }
 
-/// Applies the local core index set, then falls back to ordinary basic strategy.
+/// Applies legal local indexes before the ordinary chart, preserving surrender
+/// and split precedence. Inverse rows explicitly encode departures from the chart.
 pub fn graded_action(
     situation: Situation,
     true_count: Option<f32>,
@@ -62,11 +63,30 @@ pub fn graded_action(
     let Some(true_count) = true_count else {
         return (basic, StrategySource::BasicStrategy);
     };
+    if situation.split_aces {
+        return (basic, StrategySource::BasicStrategy);
+    }
+    let priority = |action| match action {
+        Action::Surrender => 4,
+        Action::Split => 3,
+        Action::Double => 2,
+        Action::Hit | Action::Stand => 1,
+        Action::Insure | Action::DeclineInsurance => 0,
+    };
     let mut selected = None;
+    let mut selected_priority = if matches!(basic.action, Action::Surrender | Action::Split) {
+        priority(basic.action)
+    } else {
+        0
+    };
     for &index in indexes {
+        let hand_matches = (index.kind == situation.kind && index.value == situation.value)
+            || (index.kind == HandKind::Hard
+                && situation.kind == HandKind::Pair
+                && situation.value != 11
+                && index.value == situation.value * 2);
         if index.ruleset != crate::model::RULESET_ID
-            || index.kind != situation.kind
-            || index.value != situation.value
+            || !hand_matches
             || index.dealer != situation.dealer
             || (index.das_only && !situation.can_double)
             || (index.surrender_only && !situation.can_surrender)
@@ -75,18 +95,18 @@ pub fn graded_action(
         {
             continue;
         }
-        let priority = match index.action {
-            Action::Surrender => 4,
-            Action::Split => 3,
-            Action::Double => 2,
-            Action::Hit | Action::Stand => 1,
-            Action::Insure | Action::DeclineInsurance => 0,
+        // A Fab 4 inverse hit replaces a legal chart surrender below its index.
+        let index_priority = if index.surrender_only {
+            priority(Action::Surrender)
+        } else {
+            priority(index.action)
         };
-        if selected.is_none_or(|(_, old_priority)| priority > old_priority) {
-            selected = Some((index, priority));
+        if index_priority >= selected_priority {
+            selected = Some(index);
+            selected_priority = index_priority;
         }
     }
-    selected.map_or((basic, StrategySource::BasicStrategy), |(index, _)| {
+    selected.map_or((basic, StrategySource::BasicStrategy), |index| {
         (
             Recommendation {
                 action: index.action,
@@ -175,9 +195,9 @@ const CORE_INDEX_PLAYS: [IndexPlay; 22] = [
         kind: HandKind::Hard,
         value: 11,
         dealer: 11,
-        comparison: IndexComparison::GreaterOrEqual,
-        threshold: 1.0,
-        action: Action::Double,
+        comparison: IndexComparison::Less,
+        threshold: -1.0,
+        action: Action::Hit,
         das_only: false,
         surrender_only: false,
         insurance: false,
@@ -200,7 +220,7 @@ const CORE_INDEX_PLAYS: [IndexPlay; 22] = [
         value: 10,
         dealer: 11,
         comparison: IndexComparison::GreaterOrEqual,
-        threshold: 4.0,
+        threshold: 3.0,
         action: Action::Double,
         das_only: false,
         surrender_only: false,
@@ -235,9 +255,9 @@ const CORE_INDEX_PLAYS: [IndexPlay; 22] = [
         kind: HandKind::Hard,
         value: 13,
         dealer: 2,
-        comparison: IndexComparison::GreaterOrEqual,
+        comparison: IndexComparison::Less,
         threshold: -1.0,
-        action: Action::Stand,
+        action: Action::Hit,
         das_only: false,
         surrender_only: false,
         insurance: false,
@@ -247,9 +267,9 @@ const CORE_INDEX_PLAYS: [IndexPlay; 22] = [
         kind: HandKind::Hard,
         value: 12,
         dealer: 4,
-        comparison: IndexComparison::GreaterOrEqual,
+        comparison: IndexComparison::Less,
         threshold: 0.0,
-        action: Action::Stand,
+        action: Action::Hit,
         das_only: false,
         surrender_only: false,
         insurance: false,
@@ -259,9 +279,9 @@ const CORE_INDEX_PLAYS: [IndexPlay; 22] = [
         kind: HandKind::Hard,
         value: 12,
         dealer: 5,
-        comparison: IndexComparison::GreaterOrEqual,
+        comparison: IndexComparison::Less,
         threshold: -2.0,
-        action: Action::Stand,
+        action: Action::Hit,
         das_only: false,
         surrender_only: false,
         insurance: false,
@@ -271,9 +291,9 @@ const CORE_INDEX_PLAYS: [IndexPlay; 22] = [
         kind: HandKind::Hard,
         value: 12,
         dealer: 6,
-        comparison: IndexComparison::GreaterOrEqual,
-        threshold: -1.0,
-        action: Action::Stand,
+        comparison: IndexComparison::Less,
+        threshold: -3.0,
+        action: Action::Hit,
         das_only: false,
         surrender_only: false,
         insurance: false,
@@ -283,9 +303,33 @@ const CORE_INDEX_PLAYS: [IndexPlay; 22] = [
         kind: HandKind::Hard,
         value: 13,
         dealer: 3,
-        comparison: IndexComparison::GreaterOrEqual,
+        comparison: IndexComparison::Less,
         threshold: -2.0,
-        action: Action::Stand,
+        action: Action::Hit,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Pair,
+        value: 10,
+        dealer: 5,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 5.0,
+        action: Action::Split,
+        das_only: false,
+        surrender_only: false,
+        insurance: false,
+    },
+    IndexPlay {
+        ruleset: crate::model::RULESET_ID,
+        kind: HandKind::Pair,
+        value: 10,
+        dealer: 6,
+        comparison: IndexComparison::GreaterOrEqual,
+        threshold: 4.0,
+        action: Action::Split,
         das_only: false,
         surrender_only: false,
         insurance: false,
@@ -297,30 +341,6 @@ const CORE_INDEX_PLAYS: [IndexPlay; 22] = [
         dealer: 9,
         comparison: IndexComparison::GreaterOrEqual,
         threshold: 2.0,
-        action: Action::Stand,
-        das_only: false,
-        surrender_only: false,
-        insurance: false,
-    },
-    IndexPlay {
-        ruleset: crate::model::RULESET_ID,
-        kind: HandKind::Hard,
-        value: 16,
-        dealer: 8,
-        comparison: IndexComparison::GreaterOrEqual,
-        threshold: 4.0,
-        action: Action::Stand,
-        das_only: false,
-        surrender_only: false,
-        insurance: false,
-    },
-    IndexPlay {
-        ruleset: crate::model::RULESET_ID,
-        kind: HandKind::Hard,
-        value: 14,
-        dealer: 9,
-        comparison: IndexComparison::GreaterOrEqual,
-        threshold: 5.0,
         action: Action::Surrender,
         das_only: false,
         surrender_only: true,
@@ -329,11 +349,11 @@ const CORE_INDEX_PLAYS: [IndexPlay; 22] = [
     IndexPlay {
         ruleset: crate::model::RULESET_ID,
         kind: HandKind::Hard,
-        value: 14,
+        value: 15,
         dealer: 11,
-        comparison: IndexComparison::GreaterOrEqual,
-        threshold: 3.0,
-        action: Action::Surrender,
+        comparison: IndexComparison::Less,
+        threshold: -1.0,
+        action: Action::Hit,
         das_only: false,
         surrender_only: true,
         insurance: false,
@@ -355,9 +375,9 @@ const CORE_INDEX_PLAYS: [IndexPlay; 22] = [
         kind: HandKind::Hard,
         value: 15,
         dealer: 10,
-        comparison: IndexComparison::GreaterOrEqual,
+        comparison: IndexComparison::Less,
         threshold: 0.0,
-        action: Action::Surrender,
+        action: Action::Hit,
         das_only: false,
         surrender_only: true,
         insurance: false,
@@ -565,43 +585,347 @@ mod tests {
     }
 
     #[test]
-    fn core_indexes_are_illustrious_eighteen_plus_fab_four() {
-        let plays = core_index_plays();
-        assert_eq!(plays.len(), 22);
-        assert!(!plays.iter().any(|play| play.kind == HandKind::Pair));
+    fn published_h17_indexes_grade_both_sides_of_every_boundary() {
+        use Action::*;
+        use HandKind::*;
+        use IndexComparison::{GreaterOrEqual, Less};
+        // Expected actions below / at / above the published H17 crossover.
         let expected = [
-            (HandKind::Insurance, 0, 11, 3.0, Action::Insure, false),
-            (HandKind::Hard, 16, 10, 0.0, Action::Stand, false),
-            (HandKind::Hard, 15, 10, 4.0, Action::Stand, false),
-            (HandKind::Hard, 10, 10, 4.0, Action::Double, false),
-            (HandKind::Hard, 12, 3, 2.0, Action::Stand, false),
-            (HandKind::Hard, 12, 2, 3.0, Action::Stand, false),
-            (HandKind::Hard, 11, 11, 1.0, Action::Double, false),
-            (HandKind::Hard, 9, 2, 1.0, Action::Double, false),
-            (HandKind::Hard, 10, 11, 4.0, Action::Double, false),
-            (HandKind::Hard, 9, 7, 3.0, Action::Double, false),
-            (HandKind::Hard, 16, 9, 5.0, Action::Stand, false),
-            (HandKind::Hard, 13, 2, -1.0, Action::Stand, false),
-            (HandKind::Hard, 12, 4, 0.0, Action::Stand, false),
-            (HandKind::Hard, 12, 5, -2.0, Action::Stand, false),
-            (HandKind::Hard, 12, 6, -1.0, Action::Stand, false),
-            (HandKind::Hard, 13, 3, -2.0, Action::Stand, false),
-            (HandKind::Hard, 15, 9, 2.0, Action::Stand, false),
-            (HandKind::Hard, 16, 8, 4.0, Action::Stand, false),
-            (HandKind::Hard, 14, 9, 5.0, Action::Surrender, true),
-            (HandKind::Hard, 14, 11, 3.0, Action::Surrender, true),
-            (HandKind::Hard, 14, 10, 3.0, Action::Surrender, true),
-            (HandKind::Hard, 15, 10, 0.0, Action::Surrender, true),
+            (
+                Insurance,
+                0,
+                11,
+                GreaterOrEqual,
+                3.0,
+                Insure,
+                false,
+                [DeclineInsurance, Insure, Insure],
+            ),
+            (
+                Hard,
+                16,
+                10,
+                GreaterOrEqual,
+                0.0,
+                Stand,
+                false,
+                [Hit, Stand, Stand],
+            ),
+            (
+                Hard,
+                15,
+                10,
+                GreaterOrEqual,
+                4.0,
+                Stand,
+                false,
+                [Hit, Stand, Stand],
+            ),
+            (
+                Pair,
+                10,
+                5,
+                GreaterOrEqual,
+                5.0,
+                Split,
+                false,
+                [Stand, Split, Split],
+            ),
+            (
+                Pair,
+                10,
+                6,
+                GreaterOrEqual,
+                4.0,
+                Split,
+                false,
+                [Stand, Split, Split],
+            ),
+            (
+                Hard,
+                10,
+                10,
+                GreaterOrEqual,
+                4.0,
+                Double,
+                false,
+                [Hit, Double, Double],
+            ),
+            (
+                Hard,
+                12,
+                3,
+                GreaterOrEqual,
+                2.0,
+                Stand,
+                false,
+                [Hit, Stand, Stand],
+            ),
+            (
+                Hard,
+                12,
+                2,
+                GreaterOrEqual,
+                3.0,
+                Stand,
+                false,
+                [Hit, Stand, Stand],
+            ),
+            (Hard, 11, 11, Less, -1.0, Hit, false, [Hit, Double, Double]),
+            (
+                Hard,
+                9,
+                2,
+                GreaterOrEqual,
+                1.0,
+                Double,
+                false,
+                [Hit, Double, Double],
+            ),
+            (
+                Hard,
+                10,
+                11,
+                GreaterOrEqual,
+                3.0,
+                Double,
+                false,
+                [Hit, Double, Double],
+            ),
+            (
+                Hard,
+                9,
+                7,
+                GreaterOrEqual,
+                3.0,
+                Double,
+                false,
+                [Hit, Double, Double],
+            ),
+            (
+                Hard,
+                16,
+                9,
+                GreaterOrEqual,
+                5.0,
+                Stand,
+                false,
+                [Hit, Stand, Stand],
+            ),
+            (Hard, 13, 2, Less, -1.0, Hit, false, [Hit, Stand, Stand]),
+            (Hard, 12, 4, Less, 0.0, Hit, false, [Hit, Stand, Stand]),
+            (Hard, 12, 5, Less, -2.0, Hit, false, [Hit, Stand, Stand]),
+            (Hard, 12, 6, Less, -3.0, Hit, false, [Hit, Stand, Stand]),
+            (Hard, 13, 3, Less, -2.0, Hit, false, [Hit, Stand, Stand]),
+            (
+                Hard,
+                14,
+                10,
+                GreaterOrEqual,
+                3.0,
+                Surrender,
+                true,
+                [Hit, Surrender, Surrender],
+            ),
+            (
+                Hard,
+                15,
+                9,
+                GreaterOrEqual,
+                2.0,
+                Surrender,
+                true,
+                [Hit, Surrender, Surrender],
+            ),
+            (
+                Hard,
+                15,
+                10,
+                Less,
+                0.0,
+                Hit,
+                true,
+                [Hit, Surrender, Surrender],
+            ),
+            (
+                Hard,
+                15,
+                11,
+                Less,
+                -1.0,
+                Hit,
+                true,
+                [Hit, Surrender, Surrender],
+            ),
         ];
-        for (kind, value, dealer, threshold, action, surrender_only) in expected {
-            assert!(plays.iter().any(|play| {
-                play.kind == kind
-                    && play.value == value
-                    && play.dealer == dealer
-                    && (play.threshold - threshold).abs() < f32::EPSILON
-                    && play.action == action
-                    && play.surrender_only == surrender_only
-            }));
+        assert_eq!(core_index_plays().len(), expected.len());
+        for (kind, value, dealer, comparison, threshold, action, surrender_only, actions) in
+            expected
+        {
+            let play = core_index_plays()
+                .iter()
+                .find(|play| {
+                    play.kind == kind
+                        && play.value == value
+                        && play.dealer == dealer
+                        && play.surrender_only == surrender_only
+                })
+                .expect("published play is present");
+            assert_eq!(play.comparison, comparison);
+            assert_eq!(play.threshold, threshold);
+            assert_eq!(play.action, action);
+            assert_eq!(play.insurance, kind == Insurance);
+            assert_eq!(play.ruleset, crate::model::RULESET_ID);
+            let situation = Situation {
+                kind,
+                value,
+                dealer,
+                can_double: true,
+                can_split: kind == Pair,
+                can_surrender: surrender_only,
+                split_aces: false,
+            };
+            for (count, expected_action) in [threshold - 0.01, threshold, threshold + 0.01]
+                .into_iter()
+                .zip(actions)
+            {
+                let (actual, source) = graded_action(situation, Some(count), core_index_plays());
+                assert_eq!(actual.action, expected_action, "{play:?} at {count}");
+                assert!(situation.allows(actual.action));
+                assert_eq!(
+                    source,
+                    if play.matches(count) {
+                        StrategySource::CoreIndex
+                    } else {
+                        StrategySource::BasicStrategy
+                    },
+                    "{play:?} at {count}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn index_legality_surrender_and_split_precedence() {
+        let mut s = Situation {
+            kind: HandKind::Hard,
+            value: 16,
+            dealer: 10,
+            can_double: true,
+            can_split: false,
+            can_surrender: true,
+            split_aces: false,
+        };
+        for count in [-8.0, 0.0, 8.0] {
+            assert_eq!(
+                graded_action(s, Some(count), core_index_plays()).0.action,
+                Action::Surrender
+            );
+        }
+        s.value = 15;
+        assert_eq!(
+            graded_action(s, Some(-0.01), core_index_plays()).0.action,
+            Action::Hit
+        );
+        assert_eq!(
+            graded_action(s, Some(8.0), core_index_plays()).0.action,
+            Action::Surrender
+        );
+        s.can_surrender = false;
+        assert_eq!(
+            graded_action(s, Some(8.0), core_index_plays()).0.action,
+            Action::Stand
+        );
+        s.value = 14;
+        assert_eq!(
+            graded_action(s, Some(8.0), core_index_plays()).0.action,
+            Action::Hit
+        );
+        s.value = 10;
+        s.can_double = false;
+        assert_eq!(
+            graded_action(s, Some(8.0), core_index_plays()).0.action,
+            Action::Hit
+        );
+        s.kind = HandKind::Pair;
+        s.value = 10;
+        s.dealer = 6;
+        assert_eq!(
+            graded_action(s, Some(8.0), core_index_plays()).0.action,
+            Action::Stand
+        );
+        s.can_split = true;
+        assert_eq!(
+            graded_action(s, Some(8.0), core_index_plays()).0.action,
+            Action::Split
+        );
+        // Hard-total indexes also apply to pairs when the ordinary split is unavailable.
+        s.value = 6;
+        s.dealer = 4;
+        assert_eq!(
+            graded_action(s, Some(-1.0), core_index_plays()).0.action,
+            Action::Split
+        );
+        s.can_split = false;
+        assert_eq!(
+            graded_action(s, Some(-1.0), core_index_plays()).0.action,
+            Action::Hit
+        );
+        s.value = 5;
+        s.dealer = 10;
+        s.can_double = true;
+        assert_eq!(
+            graded_action(s, Some(4.0), core_index_plays()).0.action,
+            Action::Double
+        );
+    }
+
+    #[test]
+    fn no_index_count_or_matching_play_preserves_ordinary_chart() {
+        for kind in [
+            HandKind::Hard,
+            HandKind::Soft,
+            HandKind::Pair,
+            HandKind::Insurance,
+        ] {
+            for value in 2..=20 {
+                for dealer in 2..=11 {
+                    let s = Situation {
+                        kind,
+                        value,
+                        dealer,
+                        can_double: true,
+                        can_split: kind == HandKind::Pair,
+                        can_surrender: true,
+                        split_aces: false,
+                    };
+                    assert_eq!(
+                        graded_action(s, None, core_index_plays()),
+                        (recommendation(s), StrategySource::BasicStrategy)
+                    );
+                    assert_eq!(
+                        graded_action(s, Some(8.0), &[]),
+                        (recommendation(s), StrategySource::BasicStrategy)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn index_comparators_keep_strict_and_inclusive_boundaries_distinct() {
+        let play = core_index_plays()[0];
+        for (comparison, expected) in [
+            (IndexComparison::Less, [true, false, false]),
+            (IndexComparison::LessOrEqual, [true, true, false]),
+            (IndexComparison::Greater, [false, false, true]),
+            (IndexComparison::GreaterOrEqual, [false, true, true]),
+        ] {
+            let play = IndexPlay { comparison, ..play };
+            assert_eq!(
+                [play.matches(2.99), play.matches(3.0), play.matches(3.01)],
+                expected
+            );
         }
     }
 
@@ -621,8 +945,16 @@ mod tests {
         s.split_aces = true;
         s.can_double = false;
         assert_eq!(recommendation(s).action, Action::Stand);
+        assert_eq!(
+            graded_action(s, Some(-8.0), core_index_plays()).0.action,
+            Action::Stand
+        );
         s.can_split = true;
         assert_eq!(recommendation(s).action, Action::Split);
+        assert_eq!(
+            graded_action(s, Some(-8.0), core_index_plays()).0.action,
+            Action::Split
+        );
         s.kind = HandKind::Insurance;
         assert_eq!(recommendation(s).action, Action::DeclineInsurance);
     }
